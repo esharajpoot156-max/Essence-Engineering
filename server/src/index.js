@@ -3,6 +3,7 @@ import express from 'express'
 import cors from 'cors'
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
+import { rateLimit } from 'express-rate-limit'
 import { PrismaClient } from '@prisma/client'
 
 const prisma = new PrismaClient()
@@ -10,8 +11,11 @@ const app = express()
 app.use(cors()); app.use(express.json())
 
 const N = v => Number(v || 0)
+const r2 = v => Math.round((Number(v) + Number.EPSILON) * 100) / 100
 const fail = (m, s = 400) => { const e = new Error(m); e.status = s; throw e }
-const wrap = fn => (req, res) => fn(req, res).catch(e => { console.error(e); res.status(e.status || 500).json({ error: e.message }) })
+const wrap = fn => (req, res) => fn(req, res).catch(e => { if(e.code === 'P2002') e = Object.assign(new Error('This value is already exists (duplicate email or code)'),{status: 404})
+  if(!e.status)console.error(e); res.status(e.status || 500).json({ error: e.status ? e.message : 'Something went wrong on the server' })
+})
 const auth = (req, res, next) => {
   try { req.user = jwt.verify((req.headers.authorization || '').replace('Bearer ', ''), process.env.JWT_SECRET); next() }
   catch { res.status(401).json({ error: 'Please sign in again' }) }
@@ -43,7 +47,8 @@ app.use('/api', (req, res, next) => {
 })
 
 // ---- Auth & settings
-app.post('/api/auth/login', wrap(async (req, res) => {
+const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, skipSuccessfulRequests: true, message: { error: 'Too many failed logins. Try again in 15 minutes.' } })
+app.post('/api/auth/login',loginLimiter, wrap(async (req, res) => {
   const u = await prisma.user.findUnique({ where: { email: (req.body.email || '').toLowerCase() } })
   if (!u || !(await bcrypt.compare(req.body.password || '', u.password))) fail('Email or password is wrong', 401)
   res.json({ token: jwt.sign({ id: u.id, role: u.role, name: u.name }, process.env.JWT_SECRET, { expiresIn: '7d' }), name: u.name })
@@ -105,9 +110,13 @@ app.post('/api/invoices', auth, wrap(async (req, res) => {
 
 // ---- Payments: receipt (customer pays us) / payment (we pay supplier)
 app.post('/api/payments', auth, wrap(async (req, res) => {
-  const { kind, contactId, date } = req.body, amount = +req.body.amount
+  const { kind, contactId, date } = req.body, amount = r2(req.body.amount)
   if (!['receipt', 'payment'].includes(kind) || !(amount > 0)) fail('Enter an amount above zero')
   await prisma.$transaction(async tx => {
+    const c = await tx.contact.findUnique({ where: { id: +contactId }, include: { invoices: { select: { total: true } }, payments: { select: { amount: true } } } })
+    if (!c) fail('Contact not found', 404)
+    const due = r2(c.invoices.reduce((s, i) => s + N(i.total), 0) - c.payments.reduce((s, p) => s + N(p.amount), 0))
+    if (amount > due + 0.005) fail(`Amount is more than the balance due (Rs ${due.toFixed(2)})`)
     await tx.payment.create({ data: { kind, contactId: +contactId, amount, date: new Date(date || Date.now()) } })
     await post(tx, { date, memo: kind === 'receipt' ? 'Customer receipt' : 'Supplier payment',
       lines: kind === 'receipt' ? [{ code: '1000', debit: amount }, { code: '1100', credit: amount }] : [{ code: '2000', debit: amount }, { code: '1000', credit: amount }] })

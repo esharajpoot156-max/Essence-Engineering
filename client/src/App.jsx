@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Routes, Route, NavLink } from 'react-router-dom'
+import { Routes, Route, NavLink, Navigate } from 'react-router-dom'
 import { api, getToken, setToken } from './api'
 import { Dashboard, Documents, Contacts, Inventory, Leads, Reports, SettingsPage, Journal, Bank, Team } from './pages'
 
@@ -32,6 +32,12 @@ export default function App() {
   if (!settings) return <p className="p-8">Loading…</p>
   const on = m => !m || settings.modules.includes(m)
   const role = JSON.parse(atob(getToken().split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))).role
+
+  // Pages this user is allowed to see (same rule as the sidebar)
+  const allowed = NAV.filter(n => on(n[2]) && (!n[3] || n[3].includes(role)))
+  // Guard: if the user types a URL they are not allowed to open, send them to Dashboard
+  const guard = (to, element) => allowed.some(n => n[0] === to) ? element : <Navigate to="/" replace />
+
   return (
     <div className="min-h-screen md:flex">
       <aside className="bg-navy text-white md:w-60 md:min-h-screen shrink-0">
@@ -40,7 +46,7 @@ export default function App() {
           <div className="leading-tight"><p className="font-semibold">Essence</p><p className="text-sm text-white/70">Engineering</p></div>
         </div>
         <nav className="p-2 flex md:block overflow-x-auto">
-          {NAV.filter(n => on(n[2]) && (!n[3] || n[3].includes(role))).map(([to, label]) => (
+          {allowed.map(([to, label]) => (
             <NavLink key={to} to={to} end={to === '/'} className={({ isActive }) =>
               'block px-4 py-2 rounded-sm border-l-4 whitespace-nowrap ' + (isActive ? 'border-gold bg-white/10 font-medium' : 'border-transparent text-white/80 hover:bg-white/5')}>{label}</NavLink>))}
         </nav>
@@ -49,17 +55,18 @@ export default function App() {
       <main className="flex-1 p-4 md:p-8 max-w-6xl">
         <Routes>
           <Route path="/" element={<Dashboard />} />
-          <Route path="/sales" element={<Documents kind="sale" />} />
-          <Route path="/purchases" element={<Documents kind="purchase" />} />
-          <Route path="/customers" element={<Contacts type="customer" />} />
-          <Route path="/suppliers" element={<Contacts type="supplier" />} />
-          <Route path="/inventory" element={<Inventory />} />
-          <Route path="/leads" element={<Leads />} />
-          <Route path="/reports" element={<Reports />} />
-          <Route path="/journal" element={<Journal />} />
-          <Route path="/bank" element={<Bank />} />
-          <Route path="/team" element={<Team />} />
-          <Route path="/settings" element={<SettingsPage settings={settings} onSaved={refresh} />} />
+          <Route path="/sales" element={guard('/sales', <Documents kind="sale" />)} />
+          <Route path="/purchases" element={guard('/purchases', <Documents kind="purchase" />)} />
+          <Route path="/customers" element={guard('/customers', <Contacts type="customer" />)} />
+          <Route path="/suppliers" element={guard('/suppliers', <Contacts type="supplier" />)} />
+          <Route path="/inventory" element={guard('/inventory', <Inventory />)} />
+          <Route path="/leads" element={guard('/leads', <Leads />)} />
+          <Route path="/reports" element={guard('/reports', <Reports />)} />
+          <Route path="/journal" element={guard('/journal', <Journal />)} />
+          <Route path="/bank" element={guard('/bank', <Bank />)} />
+          <Route path="/team" element={guard('/team', <Team />)} />
+          <Route path="/settings" element={guard('/settings', <SettingsPage settings={settings} onSaved={refresh} />)} />
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
     </div>)
