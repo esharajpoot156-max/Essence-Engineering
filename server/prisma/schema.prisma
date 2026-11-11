@@ -1,0 +1,114 @@
+generator client{ 
+  provider = "prisma-client-js" 
+}
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Setting {
+  id       Int      @id @default(1)
+  name     String
+  currency String   @default("PKR")
+  modules  String[]
+}
+model User {
+  id       Int    @id @default(autoincrement())
+  name     String
+  email    String @unique
+  password String
+  role     String @default("admin")
+}
+model Account {
+  id    Int           @id @default(autoincrement())
+  code  String        @unique
+  name  String
+  type  String
+  lines JournalLine[]
+}
+model Journal {
+  id    Int           @id @default(autoincrement())
+  date  DateTime
+  memo  String
+  ref   String?
+  lines JournalLine[]
+}
+model JournalLine {
+  id        Int      @id @default(autoincrement())
+  journalId Int
+  accountId Int
+  debit     Decimal  @default(0) @db.Decimal(14, 2)
+  credit    Decimal  @default(0) @db.Decimal(14, 2)
+  reconciled Boolean @default(false)
+  journal   Journal  @relation(fields: [journalId], references: [id], onDelete: Cascade)
+  account   Account  @relation(fields: [accountId], references: [id])
+}
+model Contact {
+  id       Int       @id @default(autoincrement())
+  type     String
+  name     String
+  phone    String?
+  email    String?
+  invoices Invoice[]
+  payments Payment[]
+}
+model Item {
+  id     Int         @id @default(autoincrement())
+  sku    String      @unique
+  name   String
+  unit   String      @default("pcs")
+  cost   Decimal     @default(0) @db.Decimal(14, 2)
+  price  Decimal     @default(0) @db.Decimal(14, 2)
+  qty    Int         @default(0)
+  minQty Int         @default(0)
+  moves  StockMove[]
+}
+model StockMove {
+  id     Int      @id @default(autoincrement())
+  itemId Int
+  qty    Int
+  ref    String
+  date   DateTime @default(now())
+  item   Item     @relation(fields: [itemId], references: [id])
+}
+model Invoice {
+  id        Int           @id @default(autoincrement())
+  number    String        @unique
+  kind      String
+  date      DateTime
+  contactId Int
+  total     Decimal       @db.Decimal(14, 2)
+  tax       Decimal       @default(0) @db.Decimal(14, 2)
+  taxRate   Decimal       @default(0) @db.Decimal(5, 2)
+  contact   Contact       @relation(fields: [contactId], references: [id])
+  lines     InvoiceLine[]
+}
+model InvoiceLine {
+  id          Int     @id @default(autoincrement())
+  invoiceId   Int
+  itemId      Int?
+  description String  @default("")
+  qty         Int
+  price       Decimal @db.Decimal(14, 2)
+  invoice     Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+}
+model Payment {
+  id        Int      @id @default(autoincrement())
+  kind      String
+  contactId Int
+  amount    Decimal  @db.Decimal(14, 2)
+  date      DateTime
+  contact   Contact  @relation(fields: [contactId], references: [id])
+}
+model Lead {
+  id        Int      @id @default(autoincrement())
+  name      String
+  phone     String?
+  email     String?
+  source    String   @default("Manual")
+  campaign  String?
+  stage     String   @default("New")
+  notes     String?
+  metaId    String?  @unique
+  createdAt DateTime @default(now())
+}
