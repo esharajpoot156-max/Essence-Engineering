@@ -8,6 +8,7 @@ import { PrismaClient } from '@prisma/client'
 
 const prisma = new PrismaClient()
 const app = express()
+app.set('trust proxy', 1)
 app.use(cors()); app.use(express.json())
 
 const N = v => Number(v || 0)
