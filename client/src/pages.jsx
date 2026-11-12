@@ -40,23 +40,6 @@ ${d.lines.map(l => `<tr><td>${esc(l.description)}</td><td class="r">${l.qty}</td
   w.document.close(); setTimeout(() => w.print(), 600)
 }
 
-export function Dashboard() {
-  const [d] = useLoad('/dashboard')
-  if (!d?.leads) return <p>Loading…</p>
-  const stats = [['Cash in bank', d.cash], ['Customers owe us', d.receivable], ['We owe suppliers', d.payable], ['Total sales', d.sales], ['Total purchases', d.purchases]]
-  return (<>
-    <Title hint="Where the business stands today.">Dashboard</Title>
-    <dl className="grid sm:grid-cols-2 lg:grid-cols-5 gap-px bg-navy/15 border border-navy/15 rounded overflow-hidden">
-      {stats.map(([k, v]) => <div key={k} className="bg-white p-4"><dt className="text-sm text-ink/60">{k}</dt><dd className="text-xl font-semibold text-navy mt-1">{money(v)}</dd></div>)}
-    </dl>
-    <div className="grid md:grid-cols-2 gap-8 mt-8">
-      <section><h2 className="font-semibold mb-2">Lead pipeline</h2>
-        <Table cols={[['Stage', r => r[0]], ['Leads', r => r[1], 1]]} rows={Object.entries(d.leads).map(([k, v]) => ({ id: k, 0: k, 1: v }))} empty="No leads yet. Add one in Leads." /></section>
-      <section><h2 className="font-semibold mb-2">Items running low</h2>
-        <Table cols={[['Item', r => r.name], ['In stock', r => r.qty, 1], ['Minimum', r => r.minQty, 1]]} rows={d.lowStock} empty="All items are above their minimum." /></section>
-    </div>
-  </>)
-}
 
 export function Documents({ kind }) {
   const sale = kind === 'sale'
