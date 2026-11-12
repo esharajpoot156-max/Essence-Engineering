@@ -75,7 +75,7 @@ export default function App() {
             <span className="h-8 w-8 rounded-full bg-gold text-white grid place-items-center text-sm font-semibold uppercase">{role[0]}</span>
           </div>
         </header>
-        <main className="flex-1 min-w-0 p-4 md:p-8 max-w-7xl w-full">
+        <main className="flex-1 min-w-0 w-full max-w-[1600px] mx-auto px-4 py-6 md:px-8 md:py-8">
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/sales" element={guard('/sales', <Documents kind="sale" />)} />
