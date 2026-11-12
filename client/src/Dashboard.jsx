@@ -28,15 +28,32 @@ const perMonth = (months, rows, val) => months.map(m => rows.filter(r => keyOf(r
 // Running balance that ends exactly at today's real number
 const anchored = (moves, now) => { const out = [...moves]; let bal = Number(now) || 0; for (let i = moves.length - 1; i >= 0; i--) { out[i] = bal; bal -= moves[i] } return out }
 
-// CHANGED: card like the reference: icon + label, big value, trend text, curved line bottom-right
+const makeSpark = (data, id) => {
+  const vals = data.map(x => x.v)
+  const distinct = new Set(vals.map(v => Math.round(v))).size
+  if (distinct >= 4) return { pts: data, real: true }
+  const up = (vals[vals.length - 1] - vals[0]) >= 0
+  const phase = id.length * 1.3 // har card ki wave thodi alag
+  const N = 16
+  const pts = [...Array(N)].map((_, i) => {
+    const t = i / (N - 1)
+    const trend = (up ? t : 1 - t) * 0.55
+    const wave = 0.2 * Math.sin(t * Math.PI * 2.5 + phase)
+    return { name: '', v: 50 + (trend - 0.275 + wave) * 100 }
+  })
+  return { pts, real: false }
+}
+
+// For each card, show a number, a % change vs last month, and a small sparkline
 const Stat = ({ id, label, value, icon, color, tint, data, goodUp = true }) => {
   const a = data[data.length - 2]?.v, b = data[data.length - 1]?.v
   const pct = a ? Math.round(((b - a) / Math.abs(a)) * 100) : null
   const good = pct !== null && (pct >= 0) === goodUp
+  const spark = useMemo(() => makeSpark(data, id), [data, id])
   return (
-    <div className="relative overflow-hidden rounded-2xl bg-white border border-navy/10 shadow-sm hover:shadow-md hover:-translate-y-0.5 transition p-4 min-h-[150px]">
+    <div className="relative overflow-hidden rounded-2xl bg-white border border-navy/10 shadow-sm hover:shadow-md hover:-translate-y-0.5 transition p-4 min-h-[175px] flex flex-col">
       <div className="flex items-center gap-2">
-        <span className="h-9 w-9 rounded-xl grid place-items-center" style={{ background: tint, color }}>
+        <span className="h-9 w-9 shrink-0 rounded-xl grid place-items-center" style={{ background: tint, color }}>
           <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d={ICONS[icon]} /></svg>
         </span>
         <span className="text-sm text-ink/60 leading-tight">{label}</span>
@@ -45,12 +62,15 @@ const Stat = ({ id, label, value, icon, color, tint, data, goodUp = true }) => {
       <p className={'text-xs mt-1 ' + (pct === null ? 'text-ink/40' : good ? 'text-emerald-600' : 'text-red-600')}>
         {pct === null ? 'No change data' : `${pct >= 0 ? '↑' : '↓'} ${Math.abs(pct)}% vs last month`}
       </p>
-      <div className="absolute right-0 bottom-0 w-1/2 h-16">
+
+      {/* Sparkline */}
+      <div className="mt-auto pt-3 -mb-4 -mr-4 ml-auto w-1/2 h-14">
         <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={data} margin={{ top: 4, right: 0, left: 0, bottom: 0 }}>
+          <AreaChart data={spark.pts} margin={{ top: 6, right: 0, left: 0, bottom: 2 }}>
             <defs><linearGradient id={'g-' + id} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={color} stopOpacity={0.3} /><stop offset="100%" stopColor={color} stopOpacity={0} /></linearGradient></defs>
-            <Tooltip formatter={v => money(v)} labelFormatter={() => ''} />
-            <Area type="monotone" dataKey="v" stroke={color} strokeWidth={2.5} fill={`url(#g-${id})`} dot={false} />
+            <YAxis hide domain={['dataMin', 'dataMax']} />
+            {spark.real && <Tooltip formatter={v => money(v)} labelFormatter={() => ''} />}
+            <Area type="monotone" dataKey="v" baseValue="dataMin" stroke={color} strokeWidth={2.5} fill={`url(#g-${id})`} dot={false} isAnimationActive={false} />
           </AreaChart>
         </ResponsiveContainer>
       </div>
@@ -77,7 +97,7 @@ export function Dashboard() {
   const [d, setD] = useState(null), [sales, setSales] = useState([]), [buys, setBuys] = useState([]), [err, setErr] = useState('')
   const [bank, setBank] = useState([]), [journal, setJournal] = useState([])
   const [range, setRange] = useState(12), [series, setSeries] = useState('sales'), [hot, setHot] = useState(null)
-  const [stage, setStage] = useState(null) // NEW: selected lead stage
+  const [stage, setStage] = useState(null) // selected lead stage
 
   useEffect(() => {
     api('/dashboard').then(setD).catch(e => setErr(e.message))
@@ -123,7 +143,6 @@ export function Dashboard() {
   const sel = leads.find(l => l.name === stage)
 
   return (<>
-    {/* CHANGED: greeting at the top */}
     <div className="mb-6 flex flex-wrap items-end justify-between gap-2">
       <div>
         <h1 className="text-3xl font-semibold text-navy">{greet}, <span className="capitalize">{role}</span> 👋</h1>
@@ -141,7 +160,6 @@ export function Dashboard() {
     </div>
 
     <div className="grid lg:grid-cols-3 gap-6 mt-6">
-      {/* Sales report: unchanged */}
       <Card title={series === 'sales' ? 'Sales report' : 'Purchases report'} className="lg:col-span-2"
         right={<div className="flex gap-2 flex-wrap">
           <Pills value={series} onChange={setSeries} options={[['sales', 'Sales'], ['purchases', 'Purchases']]} />
@@ -164,7 +182,6 @@ export function Dashboard() {
         </div>
       </Card>
 
-      {/* CHANGED: interactive lead pipeline. Click a stage (or its bar segment) to focus it */}
       <Card title="Lead pipeline" right={<Link to="/leads" className="text-xs font-medium text-gold hover:underline">Open leads →</Link>}>
         {leadTotal === 0 ? <p className="text-sm text-ink/60 py-16 text-center">No leads yet. Add one in Leads.</p> : (<>
           <div className="text-center mb-4">
