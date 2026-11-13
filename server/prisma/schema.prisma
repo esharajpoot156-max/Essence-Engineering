@@ -51,6 +51,8 @@ model Contact {
   email    String?
   invoices Invoice[]
   payments Payment[]
+  quotes      Quote[]
+  creditNotes CreditNote[]
 }
 model Item {
   id     Int         @id @default(autoincrement())
@@ -84,6 +86,7 @@ model Invoice {
   cancelledAt DateTime?
   contact   Contact       @relation(fields: [contactId], references: [id])
   lines     InvoiceLine[]
+  creditNotes CreditNote[]
 }
 model InvoiceLine {
   id          Int     @id @default(autoincrement())
@@ -113,4 +116,53 @@ model Lead {
   notes     String?
   metaId    String?  @unique
   createdAt DateTime @default(now())
+}
+// Quote: no stock or accounting effect until converted to an invoice
+model Quote {
+  id        Int         @id @default(autoincrement())
+  number    String      @unique
+  date      DateTime
+  contactId Int
+  total     Decimal     @db.Decimal(14, 2)
+  tax       Decimal     @default(0) @db.Decimal(14, 2)
+  taxRate   Decimal     @default(0) @db.Decimal(5, 2)
+  status    String      @default("open") // open | converted | rejected
+  invoiceId Int?        // set when converted
+  contact   Contact     @relation(fields: [contactId], references: [id])
+  lines     QuoteLine[]
+}
+model QuoteLine {
+  id          Int     @id @default(autoincrement())
+  quoteId     Int
+  itemId      Int?
+  description String  @default("")
+  qty         Int
+  price       Decimal @db.Decimal(14, 2)
+  quote       Quote   @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+}
+
+// Credit note: reverses part or all of a sales invoice
+model CreditNote {
+  id        Int              @id @default(autoincrement())
+  number    String           @unique
+  date      DateTime
+  contactId Int
+  invoiceId Int
+  total     Decimal          @db.Decimal(14, 2)
+  tax       Decimal          @default(0) @db.Decimal(14, 2)
+  taxRate   Decimal          @default(0) @db.Decimal(5, 2)
+  restock   Boolean          @default(false) // true = goods came back into stock
+  reason    String           @default("")
+  contact   Contact          @relation(fields: [contactId], references: [id])
+  invoice   Invoice          @relation(fields: [invoiceId], references: [id])
+  lines     CreditNoteLine[]
+}
+model CreditNoteLine {
+  id           Int        @id @default(autoincrement())
+  creditNoteId Int
+  itemId       Int?
+  description  String     @default("")
+  qty          Int
+  price        Decimal    @db.Decimal(14, 2)
+  creditNote   CreditNote @relation(fields: [creditNoteId], references: [id], onDelete: Cascade)
 }

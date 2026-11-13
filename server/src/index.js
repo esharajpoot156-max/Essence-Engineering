@@ -11,7 +11,7 @@ const app = express()
 app.set('trust proxy', 1) // Render sits behind a proxy; rate limit uses the real visitor IP
 app.use(cors()); app.use(express.json())
 
-// ---- Small helpers
+// Small helpers
 const N = v => Number(v || 0)
 const r2 = v => Math.round((Number(v) + Number.EPSILON) * 100) / 100 // round money to 2 decimals
 const fail = (m, s = 400) => { const e = new Error(m); e.status = s; throw e }
@@ -38,7 +38,7 @@ async function post(tx, { date, memo, ref, lines }) {
   return tx.journal.create({ data: { date: new Date(date || Date.now()), memo, ref, lines: { create: data } } })
 }
 
-// ---- Roles: admin (all), accountant (books), sales (leads, sales), store (items, purchases)
+// Roles: admin (all), accountant (books), sales (leads, sales), store (items, purchases)
 app.use('/api', (req, res, next) => {
   if (req.path.startsWith('/auth') || req.path.startsWith('/webhooks')) return next()
   auth(req, res, () => {
@@ -48,12 +48,14 @@ app.use('/api', (req, res, next) => {
       || (w && p.startsWith('/items') && !is('admin', 'accountant', 'store'))
       || (w && p.startsWith('/leads') && !is('admin', 'accountant', 'sales'))
       || (w && p.startsWith('/invoices') && !is('admin', 'accountant', req.body?.kind === 'purchase' ? 'store' : 'sales'))
+      || (w && p.startsWith('/quotes') && !is('admin', 'accountant', 'sales'))
+      || (p.startsWith('/credit-notes') && !is('admin', 'accountant'))
     if (deny) return res.status(403).json({ error: 'Your role cannot do this' })
     next()
   })
 })
 
-// ---- Auth & settings
+// Auth & settings
 const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, skipSuccessfulRequests: true, message: { error: 'Too many failed logins. Try again in 15 minutes.' } })
 app.post('/api/auth/login', loginLimiter, wrap(async (req, res) => {
   const u = await prisma.user.findUnique({ where: { email: (req.body.email || '').toLowerCase() } })
@@ -66,18 +68,18 @@ app.put('/api/settings', auth, wrap(async (req, res) => {
   res.json(await prisma.setting.update({ where: { id: 1 }, data: { modules: req.body.modules } }))
 }))
 
-// ---- Contacts (customers / suppliers) with running balance
+// Contacts (customers / suppliers) with running balance
 // Cancelled documents are left out of the balance (status: 'active' only)
 app.get('/api/contacts', auth, wrap(async (req, res) => {
-  const rows = await prisma.contact.findMany({ where: { type: req.query.type }, include: { invoices: { where: { status: 'active' }, select: { total: true } }, payments: { select: { amount: true } } }, orderBy: { name: 'asc' } })
-  res.json(rows.map(({ invoices, payments, ...c }) => ({ ...c, balance: invoices.reduce((s, i) => s + N(i.total), 0) - payments.reduce((s, p) => s + N(p.amount), 0) })))
+  const rows = await prisma.contact.findMany({ where: { type: req.query.type }, include: { invoices: { where: { status: 'active' }, select: { total: true } }, payments: { select: { amount: true } }, creditNotes: { select: { total: true } } }, orderBy: { name: 'asc' } })
+  res.json(rows.map(({ invoices, payments, creditNotes, ...c }) => ({ ...c, balance: invoices.reduce((s, i) => s + N(i.total), 0) - payments.reduce((s, p) => s + N(p.amount), 0) - creditNotes.reduce((s, n) => s + N(n.total), 0) })))
 }))
 app.post('/api/contacts', auth, wrap(async (req, res) => {
   if (!req.body.name) fail('Name is required')
   res.json(await prisma.contact.create({ data: { type: req.body.type, name: req.body.name, phone: req.body.phone, email: req.body.email } }))
 }))
 
-// ---- Inventory items
+// Inventory items
 app.get('/api/items', auth, wrap(async (req, res) => res.json(await prisma.item.findMany({ orderBy: { name: 'asc' } }))))
 app.post('/api/items', auth, wrap(async (req, res) => {
   const { sku, name, unit, cost, price, minQty } = req.body
@@ -85,17 +87,17 @@ app.post('/api/items', auth, wrap(async (req, res) => {
   res.json(await prisma.item.create({ data: { sku, name, unit: unit || 'pcs', cost: +cost || 0, price: +price || 0, minQty: +minQty || 0 } }))
 }))
 
-// ---- Sales invoices & purchase bills: document + stock + journal in ONE transaction
+//  Sales invoices & purchase bills: document + stock + journal in ONE transaction
 app.get('/api/invoices', auth, wrap(async (req, res) =>
   res.json(await prisma.invoice.findMany({ where: { kind: req.query.kind }, include: { contact: true, lines: true }, orderBy: { id: 'desc' }, take: 100 }))))
-// ---- Invoice / bill helpers. Each one must run INSIDE a prisma.$transaction.
 
-// Money still owed by (or to) a contact, counting active documents only
+// Money still owed by (or to) a contact: active documents - payments - credit notes
 async function balanceOf(tx, contactId) {
   const c = await tx.contact.findUnique({ where: { id: contactId }, include: {
     invoices: { where: { status: 'active' }, select: { total: true } },
-    payments: { select: { amount: true } } } })
-  return c.invoices.reduce((s, i) => s + N(i.total), 0) - c.payments.reduce((s, p) => s + N(p.amount), 0)
+    payments: { select: { amount: true } },
+    creditNotes: { select: { total: true } } } })
+  return c.invoices.reduce((s, i) => s + N(i.total), 0) - c.payments.reduce((s, p) => s + N(p.amount), 0) - c.creditNotes.reduce((s, n) => s + N(n.total), 0)
 }
 
 // Saves a sale invoice or purchase bill: document + stock + journal entry
@@ -132,7 +134,7 @@ async function cancelDoc(tx, id) {
   if (!inv) fail('Document not found', 404)
   if (inv.status === 'cancelled') fail('This document is already cancelled')
 
-  // 1. Reverse stock (sale: put items back, purchase: take items out)
+  // Reverse stock (sale: put items back, purchase: take items out)
   for (const l of inv.lines.filter(l => l.itemId)) {
     const item = await tx.item.findUniqueOrThrow({ where: { id: l.itemId } })
     const delta = inv.kind === 'sale' ? Number(l.qty) : -Number(l.qty)
@@ -141,25 +143,25 @@ async function cancelDoc(tx, id) {
     await tx.stockMove.create({ data: { itemId: item.id, qty: delta, ref: inv.number + '-CANCEL' } })
   }
 
-  // 2. Post the original journal entry again with debit and credit swapped
+  // Post the original journal entry again with debit and credit swapped
   const orig = await tx.journal.findFirst({ where: { ref: inv.number }, include: { lines: true } })
   if (!orig) fail('Original journal entry not found')
   await post(tx, { date: new Date(), memo: 'Cancel ' + inv.number, ref: inv.number + '-CANCEL',
     lines: orig.lines.map(l => ({ accountId: l.accountId, debit: N(l.credit), credit: N(l.debit) })) })
 
-  // 3. Mark it cancelled (kept for the audit trail)
+  // Mark it cancelled (kept for the audit trail)
   await tx.invoice.update({ where: { id }, data: { status: 'cancelled', cancelledAt: new Date() } })
   return inv
 }
 
 const PAID_MSG = 'Payments are already recorded against this contact, so this document cannot be changed'
 
-// ---- Save a new invoice or bill
+// Save a new invoice or bill
 app.post('/api/invoices', auth, wrap(async (req, res) => {
   res.json(await prisma.$transaction(tx => createDoc(tx, req.body)))
 }))
 
-// ---- Cancel an invoice or bill
+// Cancel an invoice or bill
 app.post('/api/invoices/:id/cancel', auth, wrap(async (req, res) => {
   if (!['admin', 'accountant'].includes(req.user.role)) fail('Only admins and accountants can cancel documents', 403)
   await prisma.$transaction(async tx => {
@@ -170,7 +172,7 @@ app.post('/api/invoices/:id/cancel', auth, wrap(async (req, res) => {
   res.json({ ok: true })
 }))
 
-// ---- Edit = cancel the original + save the corrected document, in ONE transaction.
+// Edit = cancel the original + save the corrected document, in ONE transaction.
 // The corrected document gets a new number; the original stays as "Cancelled".
 app.put('/api/invoices/:id', auth, wrap(async (req, res) => {
   if (!['admin', 'accountant'].includes(req.user.role)) fail('Only admins and accountants can edit documents', 403)
@@ -190,15 +192,98 @@ app.post('/api/payments', auth, wrap(async (req, res) => {
   if (!['receipt', 'payment'].includes(kind) || !(amount > 0)) fail('Enter an amount above zero')
   await prisma.$transaction(async tx => {
     // Balance due only counts active (not cancelled) documents
-    const c = await tx.contact.findUnique({ where: { id: +contactId }, include: { invoices: { where: { status: 'active' }, select: { total: true } }, payments: { select: { amount: true } } } })
+    const c = await tx.contact.findUnique({ where: { id: +contactId } })
     if (!c) fail('Contact not found', 404)
-    const due = r2(c.invoices.reduce((s, i) => s + N(i.total), 0) - c.payments.reduce((s, p) => s + N(p.amount), 0))
+    const due = r2(await balanceOf(tx, +contactId))
     if (amount > due + 0.005) fail(`Amount is more than the balance due (Rs ${due.toFixed(2)})`)
     await tx.payment.create({ data: { kind, contactId: +contactId, amount, date: new Date(date || Date.now()) } })
     await post(tx, { date, memo: kind === 'receipt' ? 'Customer receipt' : 'Supplier payment',
       lines: kind === 'receipt' ? [{ code: '1000', debit: amount }, { code: '1100', credit: amount }] : [{ code: '2000', debit: amount }, { code: '1000', credit: amount }] })
   })
   res.json({ ok: true })
+}))
+// ---- Quotes: no stock or accounting effect until converted to a sales invoice
+app.get('/api/quotes', auth, wrap(async (req, res) =>
+  res.json(await prisma.quote.findMany({ include: { contact: true, lines: true }, orderBy: { id: 'desc' }, take: 100 }))))
+app.post('/api/quotes', auth, wrap(async (req, res) => {
+  const { contactId, date } = req.body
+  const lines = (req.body.lines || []).filter(l => +l.qty > 0).map(l => ({ ...l, qty: +l.qty, price: +l.price }))
+  if (!lines.length || !contactId) fail('Choose a customer and add at least one line')
+  if (lines.some(l => !Number.isInteger(l.qty) || !Number.isFinite(l.price) || l.price < 0)) fail('Quantity must be a whole number and price must be zero or more')
+  const quote = await prisma.$transaction(async tx => {
+    const customer = await tx.contact.findUnique({ where: { id: +contactId } })
+    if (!customer || customer.type !== 'customer') fail('Choose a valid customer')
+    const number = 'QUO-' + String((await tx.quote.count()) + 1).padStart(4, '0')
+    const subtotal = lines.reduce((s, l) => s + l.qty * l.price, 0), taxRate = Math.max(0, +req.body.taxRate || 0)
+    const tax = Math.round(subtotal * taxRate) / 100
+    return tx.quote.create({ data: { number, date: new Date(date || Date.now()), contactId: +contactId, total: subtotal + tax, tax, taxRate,
+      lines: { create: lines.map(l => ({ itemId: l.itemId ? +l.itemId : null, description: l.description || '', qty: l.qty, price: l.price })) } } })
+  })
+  res.json(quote)
+}))
+// Convert = create a real sales invoice from the quote (stock + journal) and mark the quote converted
+app.post('/api/quotes/:id/convert', auth, wrap(async (req, res) => {
+  const inv = await prisma.$transaction(async tx => {
+    const q = await tx.quote.findUnique({ where: { id: +req.params.id }, include: { lines: true } })
+    if (!q) fail('Quote not found', 404)
+    if (q.status !== 'open') fail('This quote is already ' + q.status)
+    const doc = await createDoc(tx, { kind: 'sale', contactId: q.contactId, taxRate: Number(q.taxRate),
+      lines: q.lines.map(l => ({ itemId: l.itemId, description: l.description, qty: l.qty, price: Number(l.price) })) })
+    await tx.quote.update({ where: { id: q.id }, data: { status: 'converted', invoiceId: doc.id } })
+    return doc
+  }, { timeout: 20000, maxWait: 10000 })
+  res.json(inv)
+}))
+app.post('/api/quotes/:id/reject', auth, wrap(async (req, res) => {
+  const q = await prisma.quote.findUnique({ where: { id: +req.params.id } })
+  if (!q) fail('Quote not found', 404)
+  if (q.status !== 'open') fail('This quote is already ' + q.status)
+  await prisma.quote.update({ where: { id: q.id }, data: { status: 'rejected' } })
+  res.json({ ok: true })
+}))
+
+// ---- Credit notes: reverse part or all of a sales invoice.
+// Posts Dr Sales, Dr Sales Tax Payable, Cr Receivable (plus Dr Inventory, Cr COGS if goods come back).
+app.get('/api/credit-notes', auth, wrap(async (req, res) =>
+  res.json(await prisma.creditNote.findMany({ include: { contact: true, invoice: true, lines: true }, orderBy: { id: 'desc' }, take: 100 }))))
+app.post('/api/credit-notes', auth, wrap(async (req, res) => {
+  const lines = (req.body.lines || []).map(l => ({ ...l, qty: Number(l.qty), price: Number(l.price) })).filter(l => l.qty > 0)
+  if (!lines.length) fail('Add at least one line with a quantity above zero')
+  if (lines.some(l => !Number.isInteger(l.qty) || !Number.isFinite(l.price) || l.price < 0)) fail('Quantity must be a whole number and price must be zero or more')
+  const restock = !!req.body.restock
+  const note = await prisma.$transaction(async tx => {
+    const inv = await tx.invoice.findUnique({ where: { id: +req.body.invoiceId }, include: { lines: true, creditNotes: { include: { lines: true } } } })
+    if (!inv || inv.kind !== 'sale') fail('Choose a sales invoice')
+    if (inv.status !== 'active') fail('This invoice is cancelled')
+    // Never credit more of an item than was invoiced (minus earlier credit notes)
+    for (const l of lines.filter(l => l.itemId)) {
+      const invoiced = inv.lines.filter(x => x.itemId === +l.itemId).reduce((s, x) => s + Number(x.qty), 0)
+      const credited = inv.creditNotes.flatMap(n => n.lines).filter(x => x.itemId === +l.itemId).reduce((s, x) => s + Number(x.qty), 0)
+      if (l.qty > invoiced - credited) fail(`Cannot credit more than was invoiced (${invoiced - credited} left for this item)`)
+    }
+    const taxRate = N(inv.taxRate)
+    const subtotal = r2(lines.reduce((s, l) => s + l.qty * l.price, 0)), tax = r2(subtotal * taxRate / 100), total = r2(subtotal + tax)
+    const left = r2(N(inv.total) - inv.creditNotes.reduce((s, n) => s + N(n.total), 0))
+    if (total > left + 0.005) fail(`Credit note is more than the invoice balance (Rs ${left.toFixed(2)} left to credit)`)
+    const number = 'CN-' + String((await tx.creditNote.count()) + 1).padStart(4, '0')
+    const doc = await tx.creditNote.create({ data: { number, date: new Date(req.body.date || Date.now()), contactId: inv.contactId, invoiceId: inv.id,
+      total, tax, taxRate, restock, reason: String(req.body.reason || '').slice(0, 200),
+      lines: { create: lines.map(l => ({ itemId: l.itemId ? +l.itemId : null, description: l.description || '', qty: l.qty, price: l.price })) } } })
+    // Goods came back: add stock and reverse the cost of goods sold (uses the item's current cost)
+    let cogs = 0
+    if (restock) for (const l of lines.filter(l => l.itemId)) {
+      const item = await tx.item.findUniqueOrThrow({ where: { id: +l.itemId } })
+      await tx.item.update({ where: { id: item.id }, data: { qty: { increment: l.qty } } })
+      await tx.stockMove.create({ data: { itemId: item.id, qty: l.qty, ref: number } })
+      cogs += l.qty * N(item.cost)
+    }
+    cogs = r2(cogs)
+    await post(tx, { date: req.body.date, memo: number, ref: number, lines: [
+      { code: '4000', debit: subtotal }, { code: '2100', debit: tax }, { code: '1100', credit: total },
+      { code: '1200', debit: cogs }, { code: '5000', credit: cogs }] })
+    return doc
+  }, { timeout: 20000, maxWait: 10000 })
+  res.json(note)
 }))
 
 // ---- Journal & reports
@@ -283,9 +368,10 @@ app.get('/api/dashboard', auth, wrap(async (req, res) => {
   const [b, inv, pay, items, leads] = await Promise.all([balances(), prisma.invoice.groupBy({ by: ['kind'], where: { status: 'active' }, _sum: { total: true } }),
     prisma.payment.groupBy({ by: ['kind'], _sum: { amount: true } }), prisma.item.findMany(), prisma.lead.groupBy({ by: ['stage'], _count: true })])
   const g = (rows, k, f) => N(rows.find(r => r.kind === k)?._sum[f])
+  const cn = await prisma.creditNote.aggregate({ _sum: { total: true } }) // credit notes reduce sales and receivable
   res.json({
-    sales: g(inv, 'sale', 'total'), purchases: g(inv, 'purchase', 'total'),
-    receivable: g(inv, 'sale', 'total') - g(pay, 'receipt', 'amount'), payable: g(inv, 'purchase', 'total') - g(pay, 'payment', 'amount'),
+    sales: g(inv, 'sale', 'total') - N(cn._sum.total), purchases: g(inv, 'purchase', 'total'),
+    receivable: g(inv, 'sale', 'total') - g(pay, 'receipt', 'amount') - N(cn._sum.total), payable: g(inv, 'purchase', 'total') - g(pay, 'payment', 'amount'),
     cash: b.filter(a => a.code === '1000').reduce((s, a) => s + a.debit - a.credit, 0),
     lowStock: items.filter(i => i.qty <= i.minQty), leads: Object.fromEntries(leads.map(l => [l.stage, l._count])) })
 }))
