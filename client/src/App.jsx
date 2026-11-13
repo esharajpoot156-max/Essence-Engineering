@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react'
 import { Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom'
 import { api, getToken, setToken } from './api'
-import { Documents, Contacts, Inventory, Leads, Reports, SettingsPage, Journal, Bank, Team } from './pages'
+import { Documents, Contacts, Inventory, Leads, Reports, SettingsPage, Journal, Bank, Team, Quotes, CreditNotes } from './pages'
 import { Dashboard } from './Dashboard'
 
 const BOOKS = ['admin', 'accountant']
-const NAV = [['/', 'Dashboard'], ['/sales', 'Sales', 'sales'], ['/customers', 'Customers', 'sales'], ['/purchases', 'Purchases', 'purchases'],
+const NAV = [['/', 'Dashboard'], ['/sales', 'Sales', 'sales'], ['/customers', 'Customers', 'sales'],['/quotes', 'Quotes', 'sales'], ['/credit-notes', 'Credit notes', 'sales', BOOKS], ['/purchases', 'Purchases', 'purchases'],
   ['/suppliers', 'Suppliers', 'purchases'], ['/inventory', 'Inventory', 'inventory'], ['/leads', 'Leads', 'leads'], ['/reports', 'Reports', 'reports', BOOKS],
   ['/journal', 'Journal', 'reports', BOOKS], ['/bank', 'Bank', 'reports', BOOKS], ['/team', 'Team', null, ['admin']], ['/settings', 'Settings', null, ['admin']]]
 
@@ -90,6 +90,8 @@ export default function App() {
             <Route path="/team" element={guard('/team', <Team />)} />
             <Route path="/settings" element={guard('/settings', <SettingsPage settings={settings} onSaved={refresh} />)} />
             <Route path="*" element={<Navigate to="/" replace />} />
+            <Route path="/quotes" element={guard('/quotes', <Quotes />)} />
+            <Route path="/credit-notes" element={guard('/credit-notes', <CreditNotes />)} />
           </Routes>
         </main>
       </div>

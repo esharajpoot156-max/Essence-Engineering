@@ -32,7 +32,7 @@ function printDoc(d) {
   const w = window.open('', '_blank'); if (!w) return alert('Allow pop-ups to print')
   const sub = d.lines.reduce((s, l) => s + l.qty * Number(l.price), 0)
   w.document.write(`<html><head><title>${esc(d.number)}</title><style>body{font-family:IBM Plex Sans,Arial,sans-serif;color:#14202E;padding:40px;max-width:800px;margin:auto}header{display:flex;align-items:center;gap:16px;border-bottom:4px solid #B07F24;padding-bottom:16px}h1{margin:0;color:#1F3A5A}table{width:100%;border-collapse:collapse;margin-top:24px}th{background:#1F3A5A;color:#fff;text-align:left}td,th{padding:8px;border-bottom:1px solid #ddd}.r{text-align:right}.t td{border:0}</style></head><body>
-<header><img src="${location.origin}/logo.png" height="64"><div><h1>Essence Engineering Pvt Ltd</h1><div>${d.kind === 'sale' ? 'Sales Invoice' : 'Purchase Bill'} ${esc(d.number)} · ${new Date(d.date).toLocaleDateString()}</div></div></header>
+<header><img src="${location.origin}/logo.png" height="64"><div><h1>Essence Engineering Pvt Ltd</h1><div>${d.title || (d.kind === 'sale' ? 'Sales Invoice' : 'Purchase Bill')} ${esc(d.number)} · ${new Date(d.date).toLocaleDateString()}</div></div></header>
 <p><b>${d.kind === 'sale' ? 'Bill to' : 'Supplier'}:</b> ${esc(d.contact.name)}<br>${esc(d.contact.phone)}</p>
 <table><tr><th>Description</th><th class="r">Qty</th><th class="r">Price</th><th class="r">Amount</th></tr>
 ${d.lines.map(l => `<tr><td>${esc(l.description)}</td><td class="r">${l.qty}</td><td class="r">${money(l.price)}</td><td class="r">${money(l.qty * l.price)}</td></tr>`).join('')}
@@ -265,5 +265,91 @@ export function Team() {
       <Btn onClick={() => run(async () => { await api('/users', { method: 'POST', body: f }); setF(blank) })}>Add team member</Btn></div>
     <Err e={err} /><div className="mt-4" />
     <Table cols={[['Name', r => r.name], ['Email', r => r.email], ['Role', r => r.role], ['', r => <button className="text-red-700" onClick={() => run(() => api('/users/' + r.id, { method: 'DELETE' }))}>Remove</button>]]} rows={rows} empty="No team members." />
+  </>)
+}
+// ---- Quotes: no stock or accounting effect until converted to a sales invoice
+export function Quotes() {
+  const [rows, reload] = useLoad('/quotes'), [contacts] = useLoad('/contacts?type=customer'), [items] = useLoad('/items')
+  const blank = { itemId: '', description: '', qty: 1, price: 0 }
+  const [contactId, setContactId] = useState(''), [lines, setLines] = useState([blank]), [taxRate, setTaxRate] = useState(0), [err, setErr] = useState('')
+  const subtotal = lines.reduce((s, l) => s + l.qty * l.price, 0), tax = Math.round(subtotal * taxRate) / 100, total = subtotal + tax
+  const setLine = (i, p) => setLines(lines.map((l, j) => j === i ? { ...l, ...p } : l))
+  const pick = (i, id) => { const it = items.find(x => x.id === +id); setLine(i, { itemId: id, description: it?.name || '', price: it ? Number(it.price) : 0 }) }
+  const run = async fn => { try { await fn(); setErr(''); reload() } catch (e) { setErr(e.message) } }
+  const save = () => run(async () => { await api('/quotes', { method: 'POST', body: { contactId, lines, taxRate } }); setLines([blank]); setContactId(''); setTaxRate(0) })
+  // Converting creates a real invoice, so it asks first (stock is checked by the backend)
+  const convert = r => { if (confirm(`Convert ${r.number} into a sales invoice? This reduces stock and records the sale.`)) run(async () => { const inv = await api(`/quotes/${r.id}/convert`, { method: 'POST' }); alert(`Created ${inv.number}. Find it under Sales.`) }) }
+  const badge = { open: 'bg-gold/15 text-gold', converted: 'bg-green-100 text-green-700', rejected: 'bg-red-100 text-red-700' }
+  return (<>
+    <Title hint="A quote changes nothing in stock or the books until you convert it into an invoice.">Quotes</Title>
+    <section className="bg-white border border-navy/10 rounded p-4 mb-8 space-y-3">
+      <select className={inp} value={contactId} onChange={e => setContactId(e.target.value)}>
+        <option value="">Choose customer</option>{contacts?.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
+      {lines.map((l, i) => (
+        <div key={i} className="grid grid-cols-12 gap-2">
+          <select className={inp + ' col-span-12 sm:col-span-4'} value={l.itemId} onChange={e => pick(i, e.target.value)}>
+            <option value="">Service / other</option>{items?.map(it => <option key={it.id} value={it.id}>{it.name} ({it.qty} in stock)</option>)}</select>
+          <input className={inp + ' col-span-12 sm:col-span-4'} placeholder="Description" value={l.description} onChange={e => setLine(i, { description: e.target.value })} />
+          <input className={inp + ' col-span-5 sm:col-span-1'} type="number" min="1" aria-label="Quantity" value={l.qty} onChange={e => setLine(i, { qty: +e.target.value })} />
+          <input className={inp + ' col-span-5 sm:col-span-2'} type="number" min="0" aria-label="Price" value={l.price} onChange={e => setLine(i, { price: +e.target.value })} />
+          <button className="col-span-2 sm:col-span-1 text-sm text-red-700" onClick={() => setLines(lines.length > 1 ? lines.filter((_, j) => j !== i) : [blank])}>Remove</button>
+        </div>))}
+      <div className="flex items-center gap-4"><button className="text-sm text-gold font-medium" onClick={() => setLines([...lines, blank])}>Add line</button>
+        <label className="ml-auto text-sm flex items-center gap-2">Tax %<input className={inp + ' w-20'} type="number" min="0" value={taxRate} onChange={e => setTaxRate(+e.target.value)} /></label>
+        <span className="font-semibold">Total {money(total)} <span className="text-ink/60 font-normal text-sm">(tax {money(tax)})</span></span><Btn onClick={save}>Save quote</Btn></div>
+      <Err e={err} />
+    </section>
+    <Table cols={[['Number', r => r.number], ['Date', r => new Date(r.date).toLocaleDateString()], ['Customer', r => r.contact.name], ['Total', r => money(r.total), 1],
+      ['Status', r => <span className={'text-xs px-2 py-0.5 rounded ' + badge[r.status]}>{r.status}</span>],
+      ['Action', r => <span className="inline-flex gap-3"><button className="text-gold font-medium" onClick={() => printDoc({ ...r, title: 'Quotation' })}>Print / PDF</button>
+        {r.status === 'open' && <><button className="text-gold font-medium" onClick={() => convert(r)}>Convert to invoice</button>
+          <button className="text-red-700 font-medium" onClick={() => run(() => api(`/quotes/${r.id}/reject`, { method: 'POST' }))}>Reject</button></>}</span>]]}
+      rows={rows} empty="No quotes yet. Create your first one above." />
+  </>)
+}
+
+// ---- Credit notes: reverse part or all of a sales invoice
+export function CreditNotes() {
+  const [notes, reload] = useLoad('/credit-notes'), [invoices] = useLoad('/invoices?kind=sale')
+  const [invoiceId, setInvoiceId] = useState(''), [lines, setLines] = useState([]), [restock, setRestock] = useState(true), [reason, setReason] = useState(''), [err, setErr] = useState('')
+  const inv = invoices?.find(i => i.id === +invoiceId)
+  // Choosing an invoice copies its lines; lower a quantity (or set it to 0) to credit only part of it
+  const choose = id => {
+    setInvoiceId(id); setErr('')
+    const i = invoices.find(x => x.id === +id)
+    setLines(i ? i.lines.map(l => ({ itemId: l.itemId ? String(l.itemId) : '', description: l.description || '', qty: Number(l.qty), price: Number(l.price), max: Number(l.qty) })) : [])
+  }
+  const setLine = (i, p) => setLines(lines.map((l, j) => j === i ? { ...l, ...p } : l))
+  const taxRate = Number(inv?.taxRate || 0)
+  const subtotal = lines.reduce((s, l) => s + l.qty * l.price, 0), tax = Math.round(subtotal * taxRate) / 100, total = subtotal + tax
+  const save = async () => {
+    try {
+      await api('/credit-notes', { method: 'POST', body: { invoiceId, lines, restock, reason } })
+      setInvoiceId(''); setLines([]); setReason(''); setErr(''); reload()
+    } catch (e) { setErr(e.message) }
+  }
+  return (<>
+    <Title hint="Reverse part or all of a sales invoice. It lowers what the customer owes and your sales.">Credit notes</Title>
+    <section className="bg-white border border-navy/10 rounded p-4 mb-8 space-y-3">
+      <select className={inp} value={invoiceId} onChange={e => choose(e.target.value)}>
+        <option value="">Choose the sales invoice to credit</option>
+        {invoices?.filter(i => i.status !== 'cancelled').map(i => <option key={i.id} value={i.id}>{i.number} · {i.contact.name} · {money(i.total)}</option>)}</select>
+      {lines.map((l, i) => (
+        <div key={i} className="grid grid-cols-12 gap-2 items-center">
+          <span className="col-span-12 sm:col-span-6 text-sm">{l.description || 'Service / other'}</span>
+          <input className={inp + ' col-span-6 sm:col-span-2'} type="number" min="0" max={l.max} aria-label="Quantity to credit" value={l.qty} onChange={e => setLine(i, { qty: +e.target.value })} />
+          <input className={inp + ' col-span-6 sm:col-span-2'} type="number" min="0" aria-label="Price" value={l.price} onChange={e => setLine(i, { price: +e.target.value })} />
+          <span className="col-span-12 sm:col-span-2 text-sm text-ink/60 text-right">of {l.max} sold</span>
+        </div>))}
+      {lines.length > 0 && <>
+        <input className={inp} placeholder="Reason (optional)" value={reason} onChange={e => setReason(e.target.value)} />
+        <div className="flex items-center gap-4">
+          <label className="text-sm flex items-center gap-2"><input type="checkbox" checked={restock} onChange={e => setRestock(e.target.checked)} />Goods returned to stock</label>
+          <span className="ml-auto font-semibold">Credit {money(total)} <span className="text-ink/60 font-normal text-sm">(tax {money(tax)})</span></span><Btn onClick={save}>Save credit note</Btn></div></>}
+      <Err e={err} />
+    </section>
+    <Table cols={[['Number', r => r.number], ['Date', r => new Date(r.date).toLocaleDateString()], ['Customer', r => r.contact.name], ['Invoice', r => r.invoice.number], ['Total', r => money(r.total), 1],
+      ['Share', r => <button className="text-gold font-medium" onClick={() => printDoc({ ...r, title: 'Credit Note' })}>Print / PDF</button>]]}
+      rows={notes} empty="No credit notes yet." />
   </>)
 }
