@@ -8,15 +8,21 @@ import { PrismaClient } from '@prisma/client'
 
 const prisma = new PrismaClient()
 const app = express()
-app.set('trust proxy', 1)
+app.set('trust proxy', 1) // Render sits behind a proxy; rate limit uses the real visitor IP
 app.use(cors()); app.use(express.json())
 
+// ---- Small helpers
 const N = v => Number(v || 0)
-const r2 = v => Math.round((Number(v) + Number.EPSILON) * 100) / 100
+const r2 = v => Math.round((Number(v) + Number.EPSILON) * 100) / 100 // round money to 2 decimals
 const fail = (m, s = 400) => { const e = new Error(m); e.status = s; throw e }
-const wrap = fn => (req, res) => fn(req, res).catch(e => { if(e.code === 'P2002') e = Object.assign(new Error('This value is already exists (duplicate email or code)'),{status: 404})
-  if(!e.status)console.error(e); res.status(e.status || 500).json({ error: e.status ? e.message : 'Something went wrong on the server' })
+
+// Runs a route and turns errors into clean JSON responses
+const wrap = fn => (req, res) => fn(req, res).catch(e => {
+  if (e.code === 'P2002') e = Object.assign(new Error('This value already exists (duplicate email or code)'), { status: 409 })
+  if (!e.status) console.error(e)
+  res.status(e.status || 500).json({ error: e.status ? e.message : 'Something went wrong on the server' })
 })
+
 const auth = (req, res, next) => {
   try { req.user = jwt.verify((req.headers.authorization || '').replace('Bearer ', ''), process.env.JWT_SECRET); next() }
   catch { res.status(401).json({ error: 'Please sign in again' }) }
@@ -49,7 +55,7 @@ app.use('/api', (req, res, next) => {
 
 // ---- Auth & settings
 const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, skipSuccessfulRequests: true, message: { error: 'Too many failed logins. Try again in 15 minutes.' } })
-app.post('/api/auth/login',loginLimiter, wrap(async (req, res) => {
+app.post('/api/auth/login', loginLimiter, wrap(async (req, res) => {
   const u = await prisma.user.findUnique({ where: { email: (req.body.email || '').toLowerCase() } })
   if (!u || !(await bcrypt.compare(req.body.password || '', u.password))) fail('Email or password is wrong', 401)
   res.json({ token: jwt.sign({ id: u.id, role: u.role, name: u.name }, process.env.JWT_SECRET, { expiresIn: '7d' }), name: u.name })
@@ -61,8 +67,9 @@ app.put('/api/settings', auth, wrap(async (req, res) => {
 }))
 
 // ---- Contacts (customers / suppliers) with running balance
+// Cancelled documents are left out of the balance (status: 'active' only)
 app.get('/api/contacts', auth, wrap(async (req, res) => {
-  const rows = await prisma.contact.findMany({ where: { type: req.query.type }, include: { invoices: { select: { total: true } }, payments: { select: { amount: true } } }, orderBy: { name: 'asc' } })
+  const rows = await prisma.contact.findMany({ where: { type: req.query.type }, include: { invoices: { where: { status: 'active' }, select: { total: true } }, payments: { select: { amount: true } } }, orderBy: { name: 'asc' } })
   res.json(rows.map(({ invoices, payments, ...c }) => ({ ...c, balance: invoices.reduce((s, i) => s + N(i.total), 0) - payments.reduce((s, p) => s + N(p.amount), 0) })))
 }))
 app.post('/api/contacts', auth, wrap(async (req, res) => {
@@ -81,32 +88,100 @@ app.post('/api/items', auth, wrap(async (req, res) => {
 // ---- Sales invoices & purchase bills: document + stock + journal in ONE transaction
 app.get('/api/invoices', auth, wrap(async (req, res) =>
   res.json(await prisma.invoice.findMany({ where: { kind: req.query.kind }, include: { contact: true, lines: true }, orderBy: { id: 'desc' }, take: 100 }))))
-app.post('/api/invoices', auth, wrap(async (req, res) => {
-  const { kind, contactId, date } = req.body
-  const lines = (req.body.lines || []).filter(l => +l.qty > 0).map(l => ({ ...l, qty: +l.qty, price: +l.price }))
+// ---- Invoice / bill helpers. Each one must run INSIDE a prisma.$transaction.
+
+// Money still owed by (or to) a contact, counting active documents only
+async function balanceOf(tx, contactId) {
+  const c = await tx.contact.findUnique({ where: { id: contactId }, include: {
+    invoices: { where: { status: 'active' }, select: { total: true } },
+    payments: { select: { amount: true } } } })
+  return c.invoices.reduce((s, i) => s + N(i.total), 0) - c.payments.reduce((s, p) => s + N(p.amount), 0)
+}
+
+// Saves a sale invoice or purchase bill: document + stock + journal entry
+async function createDoc(tx, body) {
+  const { kind, contactId, date } = body
+  const lines = (body.lines || []).filter(l => +l.qty > 0).map(l => ({ ...l, qty: +l.qty, price: +l.price }))
   if (!['sale', 'purchase'].includes(kind) || !lines.length || !contactId) fail('Choose a contact and add at least one line')
-  const inv = await prisma.$transaction(async tx => {
-    const number = (kind === 'sale' ? 'INV-' : 'BILL-') + String((await tx.invoice.count({ where: { kind } })) + 1).padStart(4, '0')
-    const subtotal = lines.reduce((s, l) => s + l.qty * l.price, 0), taxRate = Math.max(0, +req.body.taxRate || 0)
-    const tax = Math.round(subtotal * taxRate) / 100, total = subtotal + tax
-    const doc = await tx.invoice.create({ data: { number, kind, date: new Date(date || Date.now()), contactId: +contactId, total, tax, taxRate,
-      lines: { create: lines.map(l => ({ itemId: l.itemId ? +l.itemId : null, description: l.description || '', qty: l.qty, price: l.price })) } } })
-    let cogs = 0, stockAmt = 0
-    for (const l of lines.filter(l => l.itemId)) {
-      const item = await tx.item.findUniqueOrThrow({ where: { id: +l.itemId } })
-      const delta = kind === 'sale' ? -l.qty : l.qty
-      if (item.qty + delta < 0) fail(`Not enough stock for ${item.name} (${item.qty} left)`)
-      await tx.item.update({ where: { id: item.id }, data: { qty: { increment: delta }, ...(kind === 'purchase' ? { cost: l.price } : {}) } })
-      await tx.stockMove.create({ data: { itemId: item.id, qty: delta, ref: number } })
-      if (kind === 'sale') cogs += l.qty * N(item.cost); else stockAmt += l.qty * l.price
-    }
-    const entry = kind === 'sale'
-      ? [{ code: '1100', debit: total }, { code: '4000', credit: subtotal }, { code: '2100', credit: tax }, { code: '5000', debit: cogs }, { code: '1200', credit: cogs }]
-      : [{ code: '1200', debit: stockAmt }, { code: '6000', debit: subtotal - stockAmt }, { code: '1300', debit: tax }, { code: '2000', credit: total }]
-    await post(tx, { date, memo: number, ref: number, lines: entry })
+  // The counter includes cancelled documents, so numbers are never reused
+  const number = (kind === 'sale' ? 'INV-' : 'BILL-') + String((await tx.invoice.count({ where: { kind } })) + 1).padStart(4, '0')
+  const subtotal = lines.reduce((s, l) => s + l.qty * l.price, 0), taxRate = Math.max(0, +body.taxRate || 0)
+  const tax = Math.round(subtotal * taxRate) / 100, total = subtotal + tax
+  const doc = await tx.invoice.create({ data: { number, kind, date: new Date(date || Date.now()), contactId: +contactId, total, tax, taxRate,
+    lines: { create: lines.map(l => ({ itemId: l.itemId ? +l.itemId : null, description: l.description || '', qty: l.qty, price: l.price })) } } })
+  let cogs = 0, stockAmt = 0
+  for (const l of lines.filter(l => l.itemId)) {
+    const item = await tx.item.findUniqueOrThrow({ where: { id: +l.itemId } })
+    const delta = kind === 'sale' ? -l.qty : l.qty
+    if (item.qty + delta < 0) fail(`Not enough stock for ${item.name} (${item.qty} left)`)
+    await tx.item.update({ where: { id: item.id }, data: { qty: { increment: delta }, ...(kind === 'purchase' ? { cost: l.price } : {}) } })
+    await tx.stockMove.create({ data: { itemId: item.id, qty: delta, ref: number } })
+    if (kind === 'sale') cogs += l.qty * N(item.cost); else stockAmt += l.qty * l.price
+  }
+  const entry = kind === 'sale'
+    ? [{ code: '1100', debit: total }, { code: '4000', credit: subtotal }, { code: '2100', credit: tax }, { code: '5000', debit: cogs }, { code: '1200', credit: cogs }]
+    : [{ code: '1200', debit: stockAmt }, { code: '6000', debit: subtotal - stockAmt }, { code: '1300', debit: tax }, { code: '2000', credit: total }]
+  await post(tx, { date, memo: number, ref: number, lines: entry })
+  return doc
+}
+
+// Cancels a document: reverses stock, posts a reversing journal entry, marks it cancelled.
+// Nothing is deleted, so the audit trail stays. Returns the original document.
+async function cancelDoc(tx, id) {
+  const inv = await tx.invoice.findUnique({ where: { id }, include: { lines: true } })
+  if (!inv) fail('Document not found', 404)
+  if (inv.status === 'cancelled') fail('This document is already cancelled')
+
+  // 1. Reverse stock (sale: put items back, purchase: take items out)
+  for (const l of inv.lines.filter(l => l.itemId)) {
+    const item = await tx.item.findUniqueOrThrow({ where: { id: l.itemId } })
+    const delta = inv.kind === 'sale' ? Number(l.qty) : -Number(l.qty)
+    if (item.qty + delta < 0) fail(`Cannot cancel: stock for ${item.name} would go negative (${item.qty} in stock)`)
+    await tx.item.update({ where: { id: item.id }, data: { qty: { increment: delta } } })
+    await tx.stockMove.create({ data: { itemId: item.id, qty: delta, ref: inv.number + '-CANCEL' } })
+  }
+
+  // 2. Post the original journal entry again with debit and credit swapped
+  const orig = await tx.journal.findFirst({ where: { ref: inv.number }, include: { lines: true } })
+  if (!orig) fail('Original journal entry not found')
+  await post(tx, { date: new Date(), memo: 'Cancel ' + inv.number, ref: inv.number + '-CANCEL',
+    lines: orig.lines.map(l => ({ accountId: l.accountId, debit: N(l.credit), credit: N(l.debit) })) })
+
+  // 3. Mark it cancelled (kept for the audit trail)
+  await tx.invoice.update({ where: { id }, data: { status: 'cancelled', cancelledAt: new Date() } })
+  return inv
+}
+
+const PAID_MSG = 'Payments are already recorded against this contact, so this document cannot be changed'
+
+// ---- Save a new invoice or bill
+app.post('/api/invoices', auth, wrap(async (req, res) => {
+  res.json(await prisma.$transaction(tx => createDoc(tx, req.body)))
+}))
+
+// ---- Cancel an invoice or bill
+app.post('/api/invoices/:id/cancel', auth, wrap(async (req, res) => {
+  if (!['admin', 'accountant'].includes(req.user.role)) fail('Only admins and accountants can cancel documents', 403)
+  await prisma.$transaction(async tx => {
+    const inv = await cancelDoc(tx, +req.params.id)
+    // If the contact has already paid more than what is left, undo everything
+    if (await balanceOf(tx, inv.contactId) < -0.005) fail(PAID_MSG)
+  }, { timeout: 20000, maxWait: 10000 })
+  res.json({ ok: true })
+}))
+
+// ---- Edit = cancel the original + save the corrected document, in ONE transaction.
+// The corrected document gets a new number; the original stays as "Cancelled".
+app.put('/api/invoices/:id', auth, wrap(async (req, res) => {
+  if (!['admin', 'accountant'].includes(req.user.role)) fail('Only admins and accountants can edit documents', 403)
+  const doc = await prisma.$transaction(async tx => {
+    const old = await cancelDoc(tx, +req.params.id)
+    const doc = await createDoc(tx, { ...req.body, kind: old.kind }) // kind cannot change
+    // Neither contact may end up with a negative balance because of payments already made
+    for (const cid of new Set([old.contactId, doc.contactId])) if (await balanceOf(tx, cid) < -0.005) fail(PAID_MSG)
     return doc
-  })
-  res.json(inv)
+  }, { timeout: 20000, maxWait: 10000 }) // edit runs many queries; the default 5s can be too short
+  res.json(doc)
 }))
 
 // ---- Payments: receipt (customer pays us) / payment (we pay supplier)
@@ -114,7 +189,8 @@ app.post('/api/payments', auth, wrap(async (req, res) => {
   const { kind, contactId, date } = req.body, amount = r2(req.body.amount)
   if (!['receipt', 'payment'].includes(kind) || !(amount > 0)) fail('Enter an amount above zero')
   await prisma.$transaction(async tx => {
-    const c = await tx.contact.findUnique({ where: { id: +contactId }, include: { invoices: { select: { total: true } }, payments: { select: { amount: true } } } })
+    // Balance due only counts active (not cancelled) documents
+    const c = await tx.contact.findUnique({ where: { id: +contactId }, include: { invoices: { where: { status: 'active' }, select: { total: true } }, payments: { select: { amount: true } } } })
     if (!c) fail('Contact not found', 404)
     const due = r2(c.invoices.reduce((s, i) => s + N(i.total), 0) - c.payments.reduce((s, p) => s + N(p.amount), 0))
     if (amount > due + 0.005) fail(`Amount is more than the balance due (Rs ${due.toFixed(2)})`)
@@ -202,9 +278,9 @@ app.post('/api/bank/reconcile', auth, wrap(async (req, res) => {
   await prisma.journalLine.updateMany({ where: { id: { in: (req.body.ids || []).map(Number) } }, data: { reconciled: !!req.body.value } }); res.json({ ok: true })
 }))
 
-// ---- Dashboard
+// ---- Dashboard (sales and purchases totals count active documents only)
 app.get('/api/dashboard', auth, wrap(async (req, res) => {
-  const [b, inv, pay, items, leads] = await Promise.all([balances(), prisma.invoice.groupBy({ by: ['kind'], _sum: { total: true } }),
+  const [b, inv, pay, items, leads] = await Promise.all([balances(), prisma.invoice.groupBy({ by: ['kind'], where: { status: 'active' }, _sum: { total: true } }),
     prisma.payment.groupBy({ by: ['kind'], _sum: { amount: true } }), prisma.item.findMany(), prisma.lead.groupBy({ by: ['stage'], _count: true })])
   const g = (rows, k, f) => N(rows.find(r => r.kind === k)?._sum[f])
   res.json({

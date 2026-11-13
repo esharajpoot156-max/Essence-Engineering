@@ -1,7 +1,9 @@
 import { useEffect, useState, useCallback } from 'react'
-import { api } from './api'
+import { api, getToken } from './api'
 
 export const money = n => new Intl.NumberFormat('en-PK', { style: 'currency', currency: 'PKR', maximumFractionDigits: 0 }).format(n || 0)
+// Reads the signed-in user's role from the JWT (same way App.jsx does)
+const myRole = () => { try { return JSON.parse(atob(getToken().split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))).role } catch { return '' } }
 const useLoad = path => {
   const [d, setD] = useState(null)
   const load = useCallback(() => api(path).then(setD).catch(() => setD([])), [path])
@@ -47,15 +49,37 @@ export function Documents({ kind }) {
   const blank = { itemId: '', description: '', qty: 1, price: 0 }
   const [contactId, setContactId] = useState(''), [lines, setLines] = useState([blank]), [err, setErr] = useState('')
   const [taxRate, setTaxRate] = useState(0)
+  // The document being edited (null = creating a new one)
+  const [editing, setEditing] = useState(null)
+  // Only admin and accountant see the Edit and Cancel buttons (the backend enforces this too)
+  const canCancel = ['admin', 'accountant'].includes(myRole())
+  const cancelDoc = async r => {
+    if (!confirm(`Cancel ${r.number}? This reverses the stock and the accounting entries and cannot be undone.`)) return
+    try { await api(`/invoices/${r.id}/cancel`, { method: 'POST' }); setErr(''); reload() } catch (e) { setErr(e.message) }
+  }
   const subtotal = lines.reduce((s, l) => s + l.qty * l.price, 0), tax = Math.round(subtotal * taxRate) / 100, total = subtotal + tax
   const setLine = (i, p) => setLines(lines.map((l, j) => j === i ? { ...l, ...p } : l))
   const pick = (i, id) => { const it = items.find(x => x.id === +id); setLine(i, { itemId: id, description: it?.name || '', price: it ? Number(sale ? it.price : it.cost) : 0 }) }
+  // Resets the form back to "new document" mode
+  const clearForm = () => { setLines([blank]); setContactId(''); setTaxRate(0); setEditing(null); setErr('') }
+  // Loads an existing document into the form
+  const startEdit = r => {
+    setEditing(r); setContactId(String(r.contactId)); setTaxRate(Number(r.taxRate))
+    setLines(r.lines.map(l => ({ itemId: l.itemId ? String(l.itemId) : '', description: l.description || '', qty: Number(l.qty), price: Number(l.price) })))
+    setErr(''); window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+  // Editing saves with PUT (cancels the original, creates a corrected one); otherwise POST
   const save = async () => {
-    try { await api('/invoices', { method: 'POST', body: { kind, contactId, lines, taxRate } }); setLines([blank]); setErr(''); reload() } catch (e) { setErr(e.message) }
+    try {
+      if (editing) await api('/invoices/' + editing.id, { method: 'PUT', body: { contactId, lines, taxRate, date: editing.date } })
+      else await api('/invoices', { method: 'POST', body: { kind, contactId, lines, taxRate } })
+      clearForm(); reload()
+    } catch (e) { setErr(e.message) }
   }
   return (<>
     <Title hint={sale ? 'Saving an invoice reduces stock and records the sale in the books.' : 'Saving a bill adds stock and records what you owe.'}>{sale ? 'Sales invoices' : 'Purchase bills'}</Title>
     <section className="bg-white border border-navy/10 rounded p-4 mb-8 space-y-3">
+      {editing && <p className="text-sm bg-gold/10 border border-gold/30 rounded px-3 py-2">Editing {editing.number}. Saving cancels it and creates a new {sale ? 'invoice' : 'bill'} with the corrected details.</p>}
       <select className={inp} value={contactId} onChange={e => setContactId(e.target.value)}>
         <option value="">{sale ? 'Choose customer' : 'Choose supplier'}</option>{contacts?.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
       {lines.map((l, i) => (
@@ -69,11 +93,18 @@ export function Documents({ kind }) {
         </div>))}
       <div className="flex items-center gap-4"><button className="text-sm text-gold font-medium" onClick={() => setLines([...lines, blank])}>Add line</button>
         <label className="ml-auto text-sm flex items-center gap-2">Tax %<input className={inp + ' w-20'} type="number" min="0" value={taxRate} onChange={e => setTaxRate(+e.target.value)} /></label>
-        <span className="font-semibold">Total {money(total)} <span className="text-ink/60 font-normal text-sm">(tax {money(tax)})</span></span><Btn onClick={save}>{sale ? 'Save invoice' : 'Save bill'}</Btn></div>
+        <span className="font-semibold">Total {money(total)} <span className="text-ink/60 font-normal text-sm">(tax {money(tax)})</span></span>
+        <Btn onClick={save}>{editing ? 'Save changes' : sale ? 'Save invoice' : 'Save bill'}</Btn>
+        {editing && <button className="text-sm text-ink/60 underline" onClick={clearForm}>Stop editing</button>}</div>
       <Err e={err} />
     </section>
-    <Table cols={[['Number', r => r.number], ['Date', r => new Date(r.date).toLocaleDateString()], [sale ? 'Customer' : 'Supplier', r => r.contact.name], ['Tax', r => money(r.tax), 1], ['Total', r => money(r.total), 1],
-      ['Share', r => <span className="inline-flex gap-3"><button className="text-gold font-medium" onClick={() => printDoc(r)}>Print / PDF</button><a className="text-gold font-medium" target="_blank" rel="noreferrer" href={waLink(r)}>WhatsApp</a></span>]]}
+    <Table cols={[
+      // Number column also shows a red "Cancelled" badge for cancelled documents
+      ['Number', r => <>{r.number}{r.status === 'cancelled' && <span className="ml-2 text-xs bg-red-100 text-red-700 px-2 py-0.5 rounded">Cancelled</span>}</>],
+      ['Date', r => new Date(r.date).toLocaleDateString()], [sale ? 'Customer' : 'Supplier', r => r.contact.name], ['Tax', r => money(r.tax), 1], ['Total', r => money(r.total), 1],
+      ['Share', r => <span className="inline-flex gap-3"><button className="text-gold font-medium" onClick={() => printDoc(r)}>Print / PDF</button><a className="text-gold font-medium" target="_blank" rel="noreferrer" href={waLink(r)}>WhatsApp</a></span>],
+      // Edit and Cancel buttons: hidden for other roles and for documents that are already cancelled
+      ['Action', r => canCancel && r.status !== 'cancelled' ? <span className="inline-flex gap-3"><button className="text-gold font-medium" onClick={() => startEdit(r)}>Edit</button><button className="text-red-700 font-medium" onClick={() => cancelDoc(r)}>Cancel</button></span> : null]]}
       rows={docs} empty={sale ? 'No invoices yet. Create your first one above.' : 'No bills yet. Record your first purchase above.'} />
   </>)
 }
