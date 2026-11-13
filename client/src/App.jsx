@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react'
 import { Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom'
 import { api, getToken, setToken } from './api'
-import { Documents, Contacts, Inventory, Leads, Reports, SettingsPage, Journal, Bank, Team, Quotes, CreditNotes } from './pages'
+import { Documents, Contacts, Inventory, Leads, Reports, SettingsPage, Journal, Bank, Team, Quotes, CreditNotes,BalanceSheet, Aging } from './pages'
 import { Dashboard } from './Dashboard'
 
 const BOOKS = ['admin', 'accountant']
 const NAV = [['/', 'Dashboard'], ['/sales', 'Sales', 'sales'], ['/customers', 'Customers', 'sales'],['/quotes', 'Quotes', 'sales'], ['/credit-notes', 'Credit notes', 'sales', BOOKS], ['/purchases', 'Purchases', 'purchases'],
   ['/suppliers', 'Suppliers', 'purchases'], ['/inventory', 'Inventory', 'inventory'], ['/leads', 'Leads', 'leads'], ['/reports', 'Reports', 'reports', BOOKS],
+  ['/balance-sheet', 'Balance sheet', 'reports', BOOKS], ['/aging-customers', 'Customer aging', 'reports', BOOKS], ['/aging-suppliers', 'Supplier aging', 'reports', BOOKS],
   ['/journal', 'Journal', 'reports', BOOKS], ['/bank', 'Bank', 'reports', BOOKS], ['/team', 'Team', null, ['admin']], ['/settings', 'Settings', null, ['admin']]]
 
 function Login({ onDone }) {
@@ -89,9 +90,12 @@ export default function App() {
             <Route path="/bank" element={guard('/bank', <Bank />)} />
             <Route path="/team" element={guard('/team', <Team />)} />
             <Route path="/settings" element={guard('/settings', <SettingsPage settings={settings} onSaved={refresh} />)} />
-            <Route path="*" element={<Navigate to="/" replace />} />
+            <Route path="/balance-sheet" element={guard('/balance-sheet', <BalanceSheet />)} />
+            <Route path="/aging-customers" element={guard('/aging-customers', <Aging kind="sale" />)} />
+            <Route path="/aging-suppliers" element={guard('/aging-suppliers', <Aging kind="purchase" />)} />
             <Route path="/quotes" element={guard('/quotes', <Quotes />)} />
             <Route path="/credit-notes" element={guard('/credit-notes', <CreditNotes />)} />
+            <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </main>
       </div>

@@ -290,16 +290,66 @@ app.post('/api/credit-notes', auth, wrap(async (req, res) => {
 app.get('/api/journal', auth, wrap(async (req, res) =>
   res.json(await prisma.journal.findMany({ include: { lines: { include: { account: true } } }, orderBy: { id: 'desc' }, take: 50 }))))
 app.post('/api/journal', auth, wrap(async (req, res) => { await prisma.$transaction(tx => post(tx, req.body)); res.json({ ok: true }) }))
-async function balances() {
-  const [accounts, sums] = await Promise.all([prisma.account.findMany({ orderBy: { code: 'asc' } }), prisma.journalLine.groupBy({ by: ['accountId'], _sum: { debit: true, credit: true } })])
+// Account balances. If asOf (YYYY-MM-DD) is given, only entries up to the end of that day count.
+async function balances(asOf) {
+  if (asOf && !/^\d{4}-\d{2}-\d{2}$/.test(asOf)) fail('Date must look like 2026-11-14')
+  const where = asOf ? { journal: { date: { lte: new Date(asOf + 'T23:59:59.999Z') } } } : {}
+  const [accounts, sums] = await Promise.all([
+    prisma.account.findMany({ orderBy: { code: 'asc' } }),
+    prisma.journalLine.groupBy({ by: ['accountId'], where, _sum: { debit: true, credit: true } })])
   return accounts.map(a => { const s = sums.find(x => x.accountId === a.id)?._sum || {}; return { ...a, debit: N(s.debit), credit: N(s.credit) } })
 }
-app.get('/api/reports/trial-balance', auth, wrap(async (req, res) => res.json(await balances())))
+app.get('/api/reports/trial-balance', auth, wrap(async (req, res) => res.json(await balances(req.query.asOf))))
 app.get('/api/reports/pnl', auth, wrap(async (req, res) => {
-  const b = await balances()
+  const b = await balances(req.query.asOf)
   const income = b.filter(a => a.type === 'income').reduce((s, a) => s + a.credit - a.debit, 0)
   const expense = b.filter(a => a.type === 'expense').reduce((s, a) => s + a.debit - a.credit, 0)
   res.json({ income, expense, profit: income - expense })
+}))
+
+// Balance sheet: Assets = Liabilities + Equity + current profit
+app.get('/api/reports/balance-sheet', auth, wrap(async (req, res) => {
+  const b = await balances(req.query.asOf)
+  // Groups accounts by the first digit of the code; "sign" decides which side is positive
+  const group = (digit, sign) => b.filter(a => a.code.startsWith(digit))
+    .map(a => ({ code: a.code, name: a.name, amount: r2(sign * (a.debit - a.credit)) }))
+    .filter(a => a.amount !== 0)
+  const assets = group('1', 1), liabilities = group('2', -1), equity = group('3', -1)
+  const income = b.filter(a => a.type === 'income').reduce((s, a) => s + a.credit - a.debit, 0)
+  const expense = b.filter(a => a.type === 'expense').reduce((s, a) => s + a.debit - a.credit, 0)
+  const profit = r2(income - expense)
+  const sum = rows => r2(rows.reduce((s, a) => s + a.amount, 0))
+  const totalAssets = sum(assets), totalLE = r2(sum(liabilities) + sum(equity) + profit)
+  res.json({ assets, liabilities, equity, profit, totalAssets, totalLiabilitiesEquity: totalLE, balanced: Math.abs(totalAssets - totalLE) < 0.005 })
+}))
+
+// Aging: what each customer (kind=sale) or supplier (kind=purchase) still owes, by invoice age.
+// Payments and credit notes are applied to the oldest invoices first.
+app.get('/api/reports/aging', auth, wrap(async (req, res) => {
+  const sale = req.query.kind !== 'purchase'
+  const contacts = await prisma.contact.findMany({
+    where: { type: sale ? 'customer' : 'supplier' },
+    include: {
+      invoices: { where: { status: 'active' }, orderBy: [{ date: 'asc' }, { id: 'asc' }] },
+      payments: { select: { amount: true } },
+      creditNotes: { select: { total: true } } },
+    orderBy: { name: 'asc' } })
+  const now = Date.now(), rows = []
+  for (const c of contacts) {
+    // Money already received/paid or credited, used up against the oldest invoices
+    let credit = c.payments.reduce((s, p) => s + N(p.amount), 0) + c.creditNotes.reduce((s, n) => s + N(n.total), 0)
+    const row = { id: c.id, name: c.name, current: 0, d30: 0, d60: 0, d90: 0, total: 0 }
+    for (const i of c.invoices) {
+      const used = Math.min(credit, N(i.total)); credit -= used
+      const left = r2(N(i.total) - used)
+      if (left <= 0.005) continue
+      const days = Math.floor((now - new Date(i.date).getTime()) / 86400000)
+      const bucket = days <= 30 ? 'current' : days <= 60 ? 'd30' : days <= 90 ? 'd60' : 'd90'
+      row[bucket] = r2(row[bucket] + left); row.total = r2(row.total + left)
+    }
+    if (row.total > 0) rows.push(row)
+  }
+  res.json(rows)
 }))
 
 // ---- Leads pipeline

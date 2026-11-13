@@ -353,3 +353,55 @@ export function CreditNotes() {
       rows={notes} empty="No credit notes yet." />
   </>)
 }
+// ---- Balance Sheet: Assets = Liabilities + Equity (+ current profit)
+// One section of the balance sheet (a small table of accounts)
+const BsSection = ({ title, rows }) => (<>
+  <h2 className="font-semibold mt-6 mb-2">{title}</h2>
+  <Table cols={[['Account', r => (r.code ? r.code + ' ' : '') + r.name], ['Amount', r => money(r.amount), 1]]} rows={rows} empty="Nothing here yet." />
+</>)
+
+export function BalanceSheet() {
+  // Empty date = today; otherwise only entries up to that day are counted
+  const [asOf, setAsOf] = useState('')
+  const [bs] = useLoad('/reports/balance-sheet' + (asOf ? '?asOf=' + asOf : ''))
+  // useLoad gives null while loading and [] on error, so check for a real report
+  const ready = bs && bs.assets
+  return (<>
+    <Title hint="What the business owns, what it owes, and what is left for the owners.">Balance sheet</Title>
+    <label className="text-sm flex items-center gap-2 mb-4">As of
+      <input className={inp + ' w-44'} type="date" value={asOf} onChange={e => setAsOf(e.target.value)} />
+      {asOf && <button className="text-ink/60 underline" onClick={() => setAsOf('')}>Today</button>}
+    </label>
+    {ready && <>
+      <dl className="grid grid-cols-2 gap-px bg-navy/15 border border-navy/15 rounded overflow-hidden mb-2">
+        {[['Total assets', bs.totalAssets], ['Liabilities + equity', bs.totalLiabilitiesEquity]].map(([k, v]) =>
+          <div key={k} className="bg-white p-4"><dt className="text-sm text-ink/60">{k}</dt><dd className="text-xl font-semibold text-navy">{money(v)}</dd></div>)}
+      </dl>
+      <p className={'text-sm font-medium ' + (bs.balanced ? 'text-green-700' : 'text-red-700')}>
+        {bs.balanced ? 'Balanced.' : 'Not balanced. Check the journal entries.'}</p>
+      <BsSection title="Assets" rows={bs.assets} />
+      <BsSection title="Liabilities" rows={bs.liabilities} />
+      {/* Current profit is shown as its own line inside equity */}
+      <BsSection title="Equity" rows={[...bs.equity, { name: 'Current profit', amount: bs.profit }]} />
+    </>}
+  </>)
+}
+
+// ---- Aging: who still owes us (kind="sale") or whom we still owe (kind="purchase"), by invoice age
+export function Aging({ kind }) {
+  const sale = kind === 'sale'
+  const [rows] = useLoad('/reports/aging?kind=' + kind)
+  const sum = k => (rows || []).reduce((s, r) => s + r[k], 0)
+  // Shows a dash-free blank for empty buckets so the table is easy to scan
+  const cell = k => r => r[k] ? money(r[k]) : ''
+  return (<>
+    <Title hint="Payments and credit notes are applied to the oldest invoices first. Age counts from the invoice date.">{sale ? 'Customer aging' : 'Supplier aging'}</Title>
+    <dl className="grid grid-cols-2 gap-px bg-navy/15 border border-navy/15 rounded overflow-hidden mb-6">
+      <div className="bg-white p-4"><dt className="text-sm text-ink/60">{sale ? 'Total receivable' : 'Total payable'}</dt><dd className="text-xl font-semibold text-navy">{money(sum('total'))}</dd></div>
+      <div className="bg-white p-4"><dt className="text-sm text-ink/60">Over 90 days</dt><dd className="text-xl font-semibold text-red-700">{money(sum('d90'))}</dd></div>
+    </dl>
+    <Table cols={[[sale ? 'Customer' : 'Supplier', r => r.name], ['0-30 days', cell('current'), 1], ['31-60 days', cell('d30'), 1],
+      ['61-90 days', cell('d60'), 1], ['Over 90 days', cell('d90'), 1], ['Total', r => <b>{money(r.total)}</b>, 1]]}
+      rows={rows} empty={sale ? 'No customer owes you anything.' : 'You do not owe any supplier anything.'} />
+  </>)
+}
