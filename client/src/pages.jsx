@@ -219,7 +219,7 @@ export function Bank() {
   </>)
 }
 
-const ROLES = [['admin', 'Admin: everything'], ['accountant', 'Accountant: books, bank, reports, sales, purchases'], ['sales', 'Sales: leads, customers, invoices'], ['store', 'Store: inventory and purchase bills']]
+const ROLES = [['admin', 'Admin: everything'], ['accountant', 'Accountant: all accounts modules (no leads)'], ['sales', 'Sales (CRM): leads, customers, sales documents']]
 export function Team() {
   const blank = { name: '', email: '', password: '', role: 'sales' }
   const [rows, reload] = useLoad('/users'), [f, setF] = useState(blank), [err, setErr] = useState('')

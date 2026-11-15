@@ -24,7 +24,11 @@ import { FixedAssets, DepreciationEntries } from './FixedAssets'
 import { CapitalAccounts, SpecialAccounts, Investments } from './SimpleAccounts'
 import { ProfitAndLoss, CashFlow } from './FinancialReports'
 
-const BOOKS = ['admin', 'accountant']
+// Roles: admin (everything), accountant (accounts modules, no leads), sales (leads, customers, sales documents)
+const BOOKS = ['admin', 'accountant']            // banking, payroll, assets, accounting, reports
+const SALES = ['admin', 'accountant', 'sales']   // customers and sales documents
+const BUYING = ['admin', 'accountant']           // purchase documents, suppliers, inventory
+const LEADS = ['admin', 'sales']                 // Leads are hidden from the accountant
 
 // Sidebar, grouped like Manager.io.
 // Each group = [title, items]. Each item = [path, label, module, roles]
@@ -40,20 +44,20 @@ const GROUPS = [
     ['/reconciliations', 'Bank Reconciliations', null, BOOKS],
     ['/expense-claims', 'Expense Claims', null, BOOKS]]],
   ['Sales', [
-    ['/customers', 'Customers', 'sales'],
-    ['/sales-quotes', 'Sales Quotes', 'sales'],
-    ['/sales-orders', 'Sales Orders', 'sales'],
-    ['/sales-invoices', 'Sales Invoices', 'sales'],
-    ['/delivery-notes', 'Delivery Notes', 'sales'],
+    ['/customers', 'Customers', 'sales', SALES],
+    ['/sales-quotes', 'Sales Quotes', 'sales', SALES],
+    ['/sales-orders', 'Sales Orders', 'sales', SALES],
+    ['/sales-invoices', 'Sales Invoices', 'sales', SALES],
+    ['/delivery-notes', 'Delivery Notes', 'sales', SALES],
     ['/credit-notes', 'Credit Notes', 'sales', BOOKS]]],
   ['Purchases', [
-    ['/suppliers', 'Suppliers', 'purchases'],
-    ['/purchase-quotes', 'Purchase Quotes', 'purchases'],
-    ['/purchase-orders', 'Purchase Orders', 'purchases'],
-    ['/purchase-invoices', 'Purchase Invoices', 'purchases'],
-    ['/goods-receipts', 'Goods Receipts', 'purchases']]],
+    ['/suppliers', 'Suppliers', 'purchases', BUYING],
+    ['/purchase-quotes', 'Purchase Quotes', 'purchases', BUYING],
+    ['/purchase-orders', 'Purchase Orders', 'purchases', BUYING],
+    ['/purchase-invoices', 'Purchase Invoices', 'purchases', BUYING],
+    ['/goods-receipts', 'Goods Receipts', 'purchases', BUYING]]],
   ['Inventory and Projects', [
-    ['/inventory', 'Inventory Items', 'inventory'],
+    ['/inventory', 'Inventory Items', 'inventory', BUYING],
     ['/projects', 'Projects', null, BOOKS]]],
   ['Payroll', [
     ['/employees', 'Employees', null, BOOKS],
@@ -65,7 +69,7 @@ const GROUPS = [
     ['/capital-accounts', 'Capital Accounts', null, BOOKS],
     ['/special-accounts', 'Special Accounts', null, BOOKS],
     ['/investments', 'Investments', null, BOOKS]]],
-  ['Leads', [['/leads', 'Leads', 'leads']]],
+  ['Leads', [['/leads', 'Leads', 'leads', LEADS]]],
   ['Reports', [
     ['/reports', 'Reports', 'reports', BOOKS],
     ['/balance-sheet', 'Balance Sheet', 'reports', BOOKS],
@@ -76,9 +80,9 @@ const GROUPS = [
     ['/journal', 'Journal', 'reports', BOOKS]]],
   // Remove this group once the backend for the new pages is built
   ['Old pages', [
-    ['/sales', 'Sales (old)', 'sales'],
-    ['/purchases', 'Purchase bills (old)', 'purchases'],
-    ['/quotes', 'Quotes (old)', 'sales'],
+    ['/sales', 'Sales (old)', 'sales', SALES],
+    ['/purchases', 'Purchase bills (old)', 'purchases', BUYING],
+    ['/quotes', 'Quotes (old)', 'sales', SALES],
     ['/bank', 'Bank (old)', 'reports', BOOKS]]],
   ['Admin', [
     ['/team', 'Team', null, ['admin']],
