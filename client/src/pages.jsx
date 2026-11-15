@@ -109,37 +109,6 @@ export function Documents({ kind }) {
   </>)
 }
 
-export function Contacts({ type }) {
-  const cust = type === 'customer'
-  const [rows, reload] = useLoad('/contacts?type=' + type), [f, setF] = useState({ name: '', phone: '', email: '' }), [amt, setAmt] = useState({}), [err, setErr] = useState('')
-  const run = async fn => { try { await fn(); setErr(''); reload() } catch (e) { setErr(e.message) } }
-  return (<>
-    <Title hint={cust ? 'People who buy from you and what they still owe.' : 'People you buy from and what you still owe.'}>{cust ? 'Customers' : 'Suppliers'}</Title>
-    <div className="grid sm:grid-cols-4 gap-2 mb-2">
-      {['name', 'phone', 'email'].map(k => <input key={k} className={inp} placeholder={k[0].toUpperCase() + k.slice(1)} value={f[k]} onChange={e => setF({ ...f, [k]: e.target.value })} />)}
-      <Btn onClick={() => run(async () => { await api('/contacts', { method: 'POST', body: { ...f, type } }); setF({ name: '', phone: '', email: '' }) })}>{cust ? 'Add customer' : 'Add supplier'}</Btn></div>
-    <Err e={err} /><div className="mt-4" />
-    <Table cols={[['Name', r => r.name], ['Phone', r => r.phone], ['Balance', r => money(r.balance), 1],
-      [cust ? 'Record receipt' : 'Record payment', r => <span className="inline-flex gap-2"><input className={inp + ' w-28'} type="number" aria-label="Amount" value={amt[r.id] || ''} onChange={e => setAmt({ ...amt, [r.id]: e.target.value })} />
-        <Btn onClick={() => run(async () => { await api('/payments', { method: 'POST', body: { kind: cust ? 'receipt' : 'payment', contactId: r.id, amount: amt[r.id] } }); setAmt({ ...amt, [r.id]: '' }) })}>Save</Btn></span>]]}
-      rows={rows} empty={cust ? 'No customers yet. Add one above, or convert a lead.' : 'No suppliers yet. Add one above.'} />
-  </>)
-}
-
-export function Inventory() {
-  const [rows, reload] = useLoad('/items'), blank = { sku: '', name: '', unit: 'pcs', cost: '', price: '', minQty: '' }, [f, setF] = useState(blank), [err, setErr] = useState('')
-  const labels = { sku: 'SKU', name: 'Item name', unit: 'Unit', cost: 'Cost', price: 'Sale price', minQty: 'Minimum stock' }
-  return (<>
-    <Title hint="Stock goes up when you save a purchase bill and down when you save a sales invoice.">Inventory</Title>
-    <div className="grid sm:grid-cols-3 lg:grid-cols-7 gap-2 mb-2">
-      {Object.keys(blank).map(k => <input key={k} className={inp} placeholder={labels[k]} aria-label={labels[k]} value={f[k]} onChange={e => setF({ ...f, [k]: e.target.value })} />)}
-      <Btn onClick={async () => { try { await api('/items', { method: 'POST', body: f }); setF(blank); setErr(''); reload() } catch (e) { setErr(e.message) } }}>Add item</Btn></div>
-    <Err e={err} /><div className="mt-4" />
-    <Table cols={[['SKU', r => r.sku], ['Item', r => r.name], ['In stock', r => <span className={r.qty <= r.minQty ? 'text-red-700 font-semibold' : ''}>{r.qty} {r.unit}</span>, 1],
-      ['Cost', r => money(r.cost), 1], ['Price', r => money(r.price), 1], ['Stock value', r => money(r.qty * r.cost), 1]]} rows={rows} empty="No items yet. Add your first item above." />
-  </>)
-}
-
 const STAGES = ['New', 'Contacted', 'Qualified', 'Quotation', 'Won', 'Lost']
 export function Leads() {
   const [rows, reload] = useLoad('/leads'), [f, setF] = useState({ name: '', phone: '', source: 'Manual' }), [err, setErr] = useState('')
