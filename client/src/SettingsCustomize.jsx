@@ -1,6 +1,6 @@
 // src/SettingsCustomize.jsx
-// Settings page, like Manager.io: tiles ka grid, har tile ek alag page kholta hai.
-// Pages: Business Details, Modules, Forms, Printing, Integrations.
+// Settings page, like Manager.io: a grid of tiles, and each tile opens its own page.
+// Pages: Business Details, Modules, Form Options, Printing, Integrations.
 // Props: settings = the object from GET /api/settings, onSaved = reloads it after saving modules.
 import { useState } from 'react'
 import { api } from './api'
@@ -16,7 +16,7 @@ const MODS = [
   ['reports', 'Reports'],
 ]
 
-// Tiles in working [page, label, icon]
+// Tiles that work now: [page, label, icon]
 const READY = [
   ['business', 'Business Details', 'ℹ️'],
   ['modules', 'Modules', '🧩'],
@@ -25,7 +25,7 @@ const READY = [
   ['integrations', 'Integrations', '🔌'],
 ]
 
-// Tiles that will be built later (no icon, lighter)
+// Tiles that will be built later (shown faded, like Manager.io's unused tiles)
 const LATER = [
   'Chart of Accounts', 'Date & Number Format', 'Access Tokens', 'Control Accounts', 'Currencies',
   'Custom Buttons', 'Custom Fields', 'Custom Themes', 'Divisions', 'Email Settings',
@@ -33,7 +33,7 @@ const LATER = [
   'Non-inventory Items', 'Obsolete Features',
 ]
 
-// A white card used by every page
+// A white card used by the simple pages
 const Card = ({ children, className = '' }) => (
   <section className={'bg-white border border-navy/10 rounded p-4 space-y-3 ' + className}>{children}</section>
 )
@@ -50,29 +50,29 @@ const Crumb = ({ page, onBack }) => (
 function BusinessPage() {
   const { settings, setBusiness } = useCustomize()
   const saved = settings.business
-  // Draft
+  // Draft: changes stay here until the user clicks Update
   const [f, setF] = useState({ ...saved })
   const [msg, setMsg] = useState(''), [err, setErr] = useState('')
   const set = patch => { setF({ ...f, ...patch }); setMsg('') }
 
-  // Image file -> data URL (max 1 MB)
+  // Reads an image file into a data URL (max 1 MB) so it can be stored with the settings
   const pickImage = file => {
     if (!file) return
-    if (!file.type.startsWith('image/')) return setErr('Please select an image file only.')
-    if (file.size > 1024 * 1024) return setErr('Image size must be less than 1 MB')
+    if (!file.type.startsWith('image/')) return setErr('Please choose an image file')
+    if (file.size > 1024 * 1024) return setErr('The image must be smaller than 1 MB')
     const rd = new FileReader()
     rd.onload = () => { setErr(''); set({ image: rd.result }) }
     rd.readAsDataURL(file)
   }
 
-  // Update: draft save 
+  // Update: save the draft
   const update = () => {
     try {
       setBusiness({ ...f, name: (f.name || '').trim() })
       setErr(''); setMsg('Business details updated')
-    } catch { setErr('Could not save. The image file too large.') }
+    } catch { setErr('Could not save (the image may be too large)') }
   }
-  // Reset: discard draft and go back to saved
+  // Reset: go back to the last saved values
   const reset = () => { setF({ ...saved }); setErr(''); setMsg('') }
 
   return (
@@ -136,7 +136,7 @@ function ModulesPage({ settings, onSaved }) {
   )
 }
 
-// ---------- Page: Forms (optional checkboxes + defaults) ----------
+// ---------- Page: Form Options (optional checkboxes + defaults) ----------
 function FormsPage() {
   const { settings, setOption, setDefault, setForm } = useCustomize()
   const [key, setKey] = useState(FORMS[0].key)
@@ -244,6 +244,7 @@ export default function SettingsCustomize({ settings, onSaved }) {
       Settings
     </Title>
 
+    {/* Tiles that work now */}
     <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4 pb-6 border-b border-navy/10">
       {READY.map(([k, label, icon]) => (
         <button key={k} onClick={() => setPage(k)}
@@ -254,10 +255,10 @@ export default function SettingsCustomize({ settings, onSaved }) {
       ))}
     </div>
 
-    
+    {/* Tiles that will be built later (faded) */}
     <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4 pt-6">
       {LATER.map(label => (
-        <div key={label} title="This will be available after the backend is implemented" aria-disabled="true"
+        <div key={label} title="Coming after the backend is built" aria-disabled="true"
           className="flex items-center gap-4 p-4 opacity-40 select-none">
           <span className="h-8 w-8 rounded bg-navy/20" aria-hidden="true" />
           <span className="text-navy">{label}</span>

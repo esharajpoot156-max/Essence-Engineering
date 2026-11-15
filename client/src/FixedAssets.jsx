@@ -16,6 +16,7 @@ import { useState } from 'react'
 import { api } from './api'
 import { useLoad, money, fmtDate, today, Btn, BtnLight, Title, Err, Field, Table, inp } from './ui'
 
+// Turns any value into a number (0 if it cannot be read)
 const n = v => Number(v) || 0
 
 // Depreciation methods
@@ -158,7 +159,7 @@ export function FixedAssets() {
       {/* Preview: monthly depreciation */}
       {f.method === 'straight' && monthlyAmount({ ...f, accumulated: 0 }) > 0 && (
         <p className="text-sm text-ink/70">
-          Monthly depreciation:
+          Monthly depreciation:{' '}
           <span className="font-semibold">{money(monthlyAmount({ ...f, accumulated: 0 }))}</span>
         </p>
       )}
@@ -257,9 +258,17 @@ export function DepreciationEntries() {
     if (!f.assetId) return setErr('Please select a fixed asset')
     if (n(f.amount) <= 0) return setErr('Amount must be greater than zero')
 
+    // The entry cannot reduce the asset below zero.
+    // When editing, the entry's own old amount is added back (only if it is for the same asset).
+    const a = assetOf(f.assetId)
+    const own = editing && String(editing.assetId) === String(f.assetId) ? n(editing.amount) : 0
+    if (a && n(f.amount) > bookValue(a) + own) {
+      return setErr(`Amount cannot be more than the asset's book value (${money(bookValue(a) + own)})`)
+    }
+
     const body = {
       date: f.date, reference: f.reference.trim(), description: f.description.trim(),
-      assetId: f.assetId, amount: n(f.amount),
+      assetId: Number(f.assetId), amount: n(f.amount),
     }
 
     try {
@@ -320,7 +329,7 @@ export function DepreciationEntries() {
 
         {a && (
           <p className="text-sm text-ink/70">
-            Cost {money(a.cost)} | Accumulated {money(a.accumulated)} | Book value
+            Cost {money(a.cost)} | Accumulated {money(a.accumulated)} | Book value{' '}
             <span className="font-semibold">{money(bookValue(a))}</span>
           </p>
         )}

@@ -21,6 +21,8 @@ import Projects from './Projects'
 import Employees from './Employees'
 import Payslips from './Payslips'
 import { FixedAssets, DepreciationEntries } from './FixedAssets'
+import { CapitalAccounts, SpecialAccounts, Investments } from './SimpleAccounts'
+import { ProfitAndLoss, CashFlow } from './FinancialReports'
 
 const BOOKS = ['admin', 'accountant']
 
@@ -59,10 +61,16 @@ const GROUPS = [
   ['Assets', [
     ['/fixed-assets', 'Fixed Assets', null, BOOKS],
     ['/depreciation', 'Depreciation Entries', null, BOOKS]]],
+  ['Accounting', [
+    ['/capital-accounts', 'Capital Accounts', null, BOOKS],
+    ['/special-accounts', 'Special Accounts', null, BOOKS],
+    ['/investments', 'Investments', null, BOOKS]]],
   ['Leads', [['/leads', 'Leads', 'leads']]],
   ['Reports', [
     ['/reports', 'Reports', 'reports', BOOKS],
     ['/balance-sheet', 'Balance Sheet', 'reports', BOOKS],
+    ['/profit-and-loss', 'Profit and Loss', 'reports', BOOKS],
+    ['/cash-flow', 'Cash Flow Statement', 'reports', BOOKS],
     ['/aging-customers', 'Customer Aging', 'reports', BOOKS],
     ['/aging-suppliers', 'Supplier Aging', 'reports', BOOKS],
     ['/journal', 'Journal', 'reports', BOOKS]]],
@@ -200,12 +208,19 @@ export default function App() {
               <Route path="/fixed-assets" element={guard('/fixed-assets', <FixedAssets />)} />
               <Route path="/depreciation" element={guard('/depreciation', <DepreciationEntries />)} />
 
+              {/* Accounting */}
+              <Route path="/capital-accounts" element={guard('/capital-accounts', <CapitalAccounts />)} />
+              <Route path="/special-accounts" element={guard('/special-accounts', <SpecialAccounts />)} />
+              <Route path="/investments" element={guard('/investments', <Investments />)} />
+
               {/* Leads */}
               <Route path="/leads" element={guard('/leads', <Leads />)} />
 
               {/* Reports */}
               <Route path="/reports" element={guard('/reports', <Reports />)} />
               <Route path="/balance-sheet" element={guard('/balance-sheet', <BalanceSheet />)} />
+              <Route path="/profit-and-loss" element={guard('/profit-and-loss', <ProfitAndLoss />)} />
+              <Route path="/cash-flow" element={guard('/cash-flow', <CashFlow />)} />
               <Route path="/aging-customers" element={guard('/aging-customers', <Aging kind="sale" />)} />
               <Route path="/aging-suppliers" element={guard('/aging-suppliers', <Aging kind="purchase" />)} />
               <Route path="/journal" element={guard('/journal', <Journal />)} />

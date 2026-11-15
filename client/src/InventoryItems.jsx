@@ -28,6 +28,7 @@ const IMPORT_FIELDS = [
   ['salesPrice', 'Sales price', false, ['sales price', 'sale price', 'selling price', 'price', 'rate']],
 ]
 
+// Turns values like "1,200" or "Rs 1200" into a number (0 if it cannot be read)
 const toNum = v => Number(String(v).replace(/[^\d.-]/g, '')) || 0
 
 // Empty form values
@@ -64,8 +65,8 @@ export default function InventoryItems() {
   const [showAutofill, setShowAutofill] = useState(false)
 
   // Spreadsheet import
-  const [imp, setImp] = useState(null)          // { fileName, headers, data } (data = rows ki list, header ke baghair)
-  const [map, setMap] = useState({})            // field -> column number ('' = map nahi)
+  const [imp, setImp] = useState(null)          // { fileName, headers, data } (data = the rows, without the header row)
+  const [map, setMap] = useState({})            // field -> column index ('' = not mapped)
   const [skipExisting, setSkipExisting] = useState(true)
   const [busy, setBusy] = useState(false)
   const [progress, setProgress] = useState(0)
@@ -117,21 +118,21 @@ export default function InventoryItems() {
     try { await api('/items/' + r.id, { method: 'DELETE' }); setErr(''); setView('list'); reload() } catch (e) { setErr(e.message) }
   }
 
-  // ---------- Import
+  // ---------- Import: read the chosen file ----------
   const pickFile = async file => {
     if (!file) return
     setErr(''); setResult(null); setImp(null)
     try {
-    
+      // CSV is read as text, Excel files as binary
       const wb = /\.csv$/i.test(file.name)
         ? XLSX.read(await file.text(), { type: 'string' })
         : XLSX.read(await file.arrayBuffer(), { type: 'array' })
-    
+      // First sheet only, with empty rows removed
       const aoa = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: '' })
         .filter(r => r.some(c => String(c).trim() !== ''))
       if (aoa.length < 2) return setErr('No data rows were found in the file after the header row.')
       const headers = aoa[0].map(h => String(h).trim())
-      
+      // Match columns automatically by their header names
       const auto = {}
       IMPORT_FIELDS.forEach(([key, , , names]) => {
         const idx = headers.findIndex(h => names.includes(h.toLowerCase()))
@@ -142,7 +143,7 @@ export default function InventoryItems() {
     } catch { setErr('Unable to read the file. Please select an .xlsx, .xls, or .csv file.') }
   }
 
-  // Sample Excel download 
+  // Downloads a sample Excel file that shows the expected format
   const downloadSample = () => {
     const ws = XLSX.utils.aoa_to_sheet([
       IMPORT_FIELDS.map(x => x[1]),
@@ -153,11 +154,13 @@ export default function InventoryItems() {
     XLSX.writeFile(wb, 'inventory-items-sample.xlsx')
   }
 
-   
+  // ---------- Import: turn the rows into items ----------
+  // Names that already exist (lowercase), used to skip duplicates
   const existingNames = new Set((rows || []).map(r => String(r.name || '').trim().toLowerCase()))
+  // Reads one cell of a row using the chosen column mapping
   const cell = (r, key) => (map[key] === '' || map[key] === undefined ? '' : r[map[key]] ?? '')
   const built = (imp?.data || []).map((r, i) => ({
-    id: i, line: i + 2, // line = spreadsheet row number (header row 1)
+    id: i, line: i + 2, // line = spreadsheet row number (the header is row 1)
     name: String(cell(r, 'name')).trim(),
     unitName: String(cell(r, 'unitName')).trim(),
     description: String(cell(r, 'description')).trim(),
@@ -165,8 +168,9 @@ export default function InventoryItems() {
     salesPrice: toNum(cell(r, 'salesPrice')),
   }))
 
+  // Sends the items to the server one by one and collects the results
   const runImport = async () => {
-    if (map.name === '' || map.name === undefined) return setErr('Please select the Item Name column')
+    if (map.name === '' || map.name === undefined) return setErr('Please select the Item name column')
     setBusy(true); setErr(''); setResult(null); setProgress(0)
     const seen = new Set(existingNames)
     const failed = []
@@ -178,13 +182,13 @@ export default function InventoryItems() {
       const key = x.name.toLowerCase()
       if (skipExisting && seen.has(key)) { skipped++; continue }
       seen.add(key)
-    
+      // Same body that the New Inventory Item form sends
       const body = {
         name: x.name, description: x.description, unitName: x.unitName, valuationMethod: METHODS[0], hideName: false,
         customIncomeAccountId: null, customExpenseAccountId: null, lineDescription: '', salesDivision: '',
         purchasePrice: x.purchasePrice, salesPrice: x.salesPrice,
         unit: x.unitName || 'pcs', cost: x.purchasePrice, price: x.salesPrice,
-      
+        // TEMPORARY: unique sku, as in the form. Remove this line once sku is dropped from the backend.
         sku: 'ITEM-' + Date.now() + '-' + i,
       }
       try { await api('/items', { method: 'POST', body }); ok++ }
@@ -198,21 +202,21 @@ export default function InventoryItems() {
     const missingName = built.filter(x => !x.name).length
     const duplicates = skipExisting ? built.filter(x => x.name && existingNames.has(x.name.toLowerCase())).length : 0
     return (<>
-      <Title hint="Excel ya CSV file se items ek saath add karo."
+      <Title hint="Add multiple items at once from an Excel or CSV file."
         right={<BtnLight onClick={() => { setView('list'); reload() }}>Back to items</BtnLight>}>Import Inventory Items</Title>
 
       <section className="bg-white border border-navy/10 rounded p-4 space-y-4 max-w-4xl">
-        {/* Step 1: file */}
+        {/* Step 1: choose the file */}
         <div className="space-y-2">
-          <p className="text-sm font-medium text-navy">1. File chuno</p>
+          <p className="text-sm font-medium text-navy">1. Select file</p>
           <input type="file" accept=".xlsx,.xls,.csv" onChange={e => pickFile(e.target.files?.[0])} disabled={busy} />
-          <p className="text-xs text-ink/60">The first row must contain column headers<button className="text-gold font-medium" onClick={downloadSample}>Download sample file</button></p>
+          <p className="text-xs text-ink/60">The first row must contain column headers. <button className="text-gold font-medium" onClick={downloadSample}>Download sample file</button></p>
         </div>
 
         {imp && (<>
-          {/* Step 2: columns match */}
+          {/* Step 2: match the columns */}
           <div className="space-y-2">
-            <p className="text-sm font-medium text-navy">Match column <span className="font-normal text-ink/60">({imp.fileName}, {imp.data.length} rows)</span></p>
+            <p className="text-sm font-medium text-navy">2. Match columns <span className="font-normal text-ink/60">({imp.fileName}, {imp.data.length} rows)</span></p>
             <div className="grid sm:grid-cols-2 gap-3">
               {IMPORT_FIELDS.map(([key, label, required]) => (
                 <Field key={key} label={label + (required ? ' *' : '')}>
@@ -226,9 +230,9 @@ export default function InventoryItems() {
             </div>
           </div>
 
-          {/* Step 3: preview */}
+          {/* Step 3: preview the first rows */}
           <div className="space-y-2">
-            <p className="text-sm font-medium text-navy">Preview <span className="font-normal text-ink/60">(pehli 5 rows)</span></p>
+            <p className="text-sm font-medium text-navy">3. Preview <span className="font-normal text-ink/60">(first 5 rows)</span></p>
             <Table
               cols={[
                 ['Row', r => r.line],
@@ -243,17 +247,17 @@ export default function InventoryItems() {
             />
             <label className="flex items-center gap-2 text-sm">
               <input type="checkbox" checked={skipExisting} onChange={e => setSkipExisting(e.target.checked)} disabled={busy} />
-              Skip items that already exist with the same name.
+              Skip items that already exist with the same name
             </label>
             {(missingName > 0 || duplicates > 0) && (
               <p className="text-xs text-ink/60">
-                {missingName > 0 && `${missingName} Rows with empty names will be skipped. `}
-                {duplicates > 0 && `${duplicates} Items already exist.`}
+                {missingName > 0 && `${missingName} rows with an empty name will be skipped. `}
+                {duplicates > 0 && `${duplicates} items already exist and will be skipped.`}
               </p>
             )}
           </div>
 
-          {/* Step 4: import */}
+          {/* Step 4: run the import */}
           <div className="flex items-center gap-3">
             <Btn onClick={runImport} disabled={busy}>{busy ? `Importing ${progress} / ${built.length}…` : `Import ${built.length} rows`}</Btn>
           </div>
@@ -263,13 +267,13 @@ export default function InventoryItems() {
 
         {result && (
           <div className="text-sm space-y-1" role="status">
-            <p className="text-green-700 font-medium">{result.ok} Items have been imported successfully.{result.skipped > 0 && `, ${result.skipped} skipped`}.</p>
+            <p className="text-green-700 font-medium">{result.ok} items imported successfully{result.skipped > 0 && `, ${result.skipped} skipped`}.</p>
             {result.failed.length > 0 && (
               <div>
-                <p className="text-red-700 font-medium">{result.failed.length} Rows failed to import:</p>
+                <p className="text-red-700 font-medium">{result.failed.length} rows failed to import:</p>
                 <ul className="list-disc pl-5 text-red-700 text-xs space-y-0.5">
                   {result.failed.slice(0, 10).map(m => <li key={m}>{m}</li>)}
-                  {result.failed.length > 10 && <li>… or{result.failed.length - 10} rows</li>}
+                  {result.failed.length > 10 && <li>… and {result.failed.length - 10} more rows</li>}
                 </ul>
               </div>
             )}

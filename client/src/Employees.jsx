@@ -81,7 +81,7 @@ export default function Employees() {
 
   // ---------- Form view ----------
   if (view === 'form') return (<>
-    <Title hint="Basic employee details. Payslips will be added in the next file.">{editing ? 'Edit Employee' : 'New Employee'}</Title>
+    <Title hint="Basic employee details.">{editing ? 'Edit Employee' : 'New Employee'}</Title>
     <section className="bg-white border border-navy/10 rounded p-4 space-y-4 max-w-3xl">
       <div className="grid sm:grid-cols-2 gap-4">
         <Field label="Employee name"><input className={inp} value={f.name} onChange={e => set({ name: e.target.value })} /></Field>

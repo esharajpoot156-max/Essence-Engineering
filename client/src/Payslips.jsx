@@ -1,5 +1,6 @@
 // src/Payslips.jsx
 // Payslips (Manager.io style): form + payslip view page after saving (Print / PDF / Clone).
+// Company name, address and logo come from Settings > Business Details.
 // Expected API (backend will be developed later):
 //   GET    /payslips              -> [{ id, date, reference, description, employeeId, employeeName,
 //                                       earnings:[{itemId,description,units,unitPrice,amount}],
@@ -17,13 +18,17 @@
 import { useState } from 'react'
 import { api } from './api'
 import { useLoad, money, fmtDate, today, Btn, BtnLight, Title, Err, Field, Table, inp } from './ui'
-
-// Company name displayed on the payslip (change it here if needed)
-const COMPANY = 'Essence Engineering'
+import { useCustomize } from './customize'
 
 // ---------- Helpers ----------
 const n = v => Number(v) || 0
 const sum = lines => (lines || []).reduce((s, l) => s + n(l.amount), 0)
+
+// Gross pay, total deductions and net pay of a payslip record
+// (uses the server's totals when they exist, otherwise adds up the lines)
+const grossOf = r => (r.gross != null ? n(r.gross) : sum(r.earnings))
+const dedOf = r => (r.totalDeductions != null ? n(r.totalDeductions) : sum(r.deductions))
+const netOf = r => (r.net != null ? n(r.net) : grossOf(r) - dedOf(r))
 
 const EARN = () => ({ itemId: '', description: '', units: '', unitPrice: '', amount: '' })
 const PLAIN = () => ({ itemId: '', description: '', amount: '' })
@@ -112,11 +117,26 @@ function Lines({ title, items, lines, onChange, withUnits }) {
 }
 
 // ---------- Payslip document (view + print) ----------
-function PayslipDoc({ r, emp, names }) {
+// all = every payslip (used for the "totals for the period" block)
+function PayslipDoc({ r, emp, names, all }) {
+  // Business name, address and logo from Settings > Business Details
+  const { settings } = useCustomize()
+  const biz = settings.business
+  const logo = r.image || (settings.print.showLogo ? biz.image : '')
+
   const earnings = r.earnings || [], deductions = r.deductions || [], contributions = r.contributions || []
-  const gross = r.gross != null ? n(r.gross) : sum(earnings)
-  const ded = r.totalDeductions != null ? n(r.totalDeductions) : sum(deductions)
-  const net = r.net != null ? n(r.net) : gross - ded
+  const gross = grossOf(r), net = netOf(r)
+
+  // Totals for the period: this employee's payslips from 1 January of the payslip's year up to this payslip's date.
+  // (Replace this with the financial year once that setting exists.)
+  const totals = (() => {
+    if (!r.showTotals) return null
+    const day = String(r.date).slice(0, 10)
+    const mine = (all || []).filter(p => p.id !== r.id && String(p.employeeId) === String(r.employeeId)
+      && String(p.date).slice(0, 4) === day.slice(0, 4) && String(p.date).slice(0, 10) <= day)
+    const list = [...mine, r] // the current payslip is always included once
+    return { gross: list.reduce((s, p) => s + grossOf(p), 0), ded: list.reduce((s, p) => s + dedOf(p), 0), net: list.reduce((s, p) => s + netOf(p), 0), year: day.slice(0, 4) }
+  })()
 
   // Line label: item name + description
   const label = l => [names[l.itemId], l.description].filter(Boolean).join(' - ')
@@ -153,9 +173,11 @@ function PayslipDoc({ r, emp, names }) {
           <p>{fmtDate(r.date)}</p>
           {r.reference && <><p className="font-semibold mt-2">Reference</p><p>{r.reference}</p></>}
         </div>
-        <div className="font-semibold max-w-[10rem]">
-          <p>{COMPANY}</p>
-          {r.image && <img src={r.image} alt="" className="mt-2 max-h-20" />}
+        {/* Business details from Settings */}
+        <div className="max-w-[12rem]">
+          <p className="font-semibold">{biz.name || 'Essence Engineering'}</p>
+          {biz.address && <p className="whitespace-pre-line">{biz.address}</p>}
+          {logo && <img src={logo} alt="" className="mt-2 max-h-20" />}
         </div>
       </div>
 
@@ -171,6 +193,20 @@ function PayslipDoc({ r, emp, names }) {
           <Section title="Contributions (employer)" lines={contributions} />
         </tbody>
       </table>
+
+      {/* "Show totals for the period" block */}
+      {totals && (
+        <table className="w-full border-collapse mt-4">
+          <thead>
+            <tr><th className={cell + ' text-left'}>Totals for {totals.year} to date</th><th className={cell + ' text-right w-40'}>Total</th></tr>
+          </thead>
+          <tbody>
+            <tr><td className={cell}>Gross pay</td><td className={cell + ' text-right'}>{totals.gross.toFixed(2)}</td></tr>
+            <tr><td className={cell}>Deductions</td><td className={cell + ' text-right'}>{totals.ded.toFixed(2)}</td></tr>
+            <tr><td className={cell + ' font-bold'}>Net pay</td><td className={cell + ' text-right font-bold'}>{totals.net.toFixed(2)}</td></tr>
+          </tbody>
+        </table>
+      )}
 
       {r.footer && <p className="mt-6 text-xs whitespace-pre-line">{r.footer}</p>}
     </div>
@@ -275,8 +311,8 @@ export default function Payslips() {
       `Date: ${fmtDate(r.date)}`,
       ...(r.earnings || []).map(l => `Earnings: ${[names[l.itemId], l.description].filter(Boolean).join(' - ')} ${n(l.amount).toFixed(2)}`),
       ...(r.deductions || []).map(l => `Deduction: ${[names[l.itemId], l.description].filter(Boolean).join(' - ')} ${n(l.amount).toFixed(2)}`),
-      `Gross pay: ${sum(r.earnings).toFixed(2)}`,
-      `Net pay: ${(sum(r.earnings) - sum(r.deductions)).toFixed(2)}`,
+      `Gross pay: ${grossOf(r).toFixed(2)}`,
+      `Net pay: ${netOf(r).toFixed(2)}`,
     ]
 
     navigator.clipboard?.writeText(lines.join('\n')).catch(() => {})
@@ -301,7 +337,7 @@ export default function Payslips() {
 
     <Err e={err} />
     <div className="bg-mist/40 p-4 rounded">
-      <PayslipDoc r={current} emp={empOf(current)} names={names} />
+      <PayslipDoc r={current} emp={empOf(current)} names={names} all={rows} />
     </div>
   </>)
 
@@ -357,7 +393,7 @@ export default function Payslips() {
           {f.useFooter && <textarea rows={2} className={inp + ' max-w-xl'} aria-label="Footer" value={f.footer} onChange={e => set({ footer: e.target.value })} />}
         </div>
 
-        {/* Image */}
+        {/* Image (overrides the logo from Business Details on this payslip only) */}
         <fieldset className="border border-navy/15 rounded p-3">
           <legend className="px-2 text-sm text-ink/70">Image</legend>
           <input type="file" accept="image/*" onChange={e => pickImage(e.target.files?.[0])} />
@@ -391,9 +427,6 @@ export default function Payslips() {
   }
 
   // ================= List view =================
-  const grossOf = r => (r.gross != null ? n(r.gross) : sum(r.earnings))
-  const netOf = r => (r.net != null ? n(r.net) : grossOf(r) - (r.totalDeductions != null ? n(r.totalDeductions) : sum(r.deductions)))
-
   const q = search.toLowerCase()
   const shown = rows && rows.filter(r => [r.reference, r.description, r.employeeName, r.employee?.name].join(' ').toLowerCase().includes(q))
 

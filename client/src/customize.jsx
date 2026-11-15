@@ -49,7 +49,7 @@ export const DEFAULT_LABELS = {
 }
 
 // ---------- Starting values ----------
-const BUSINESS = { name: 'Essence Engineering Pvt Ltd', address: '', phone: '', email: '', ntn: '' }
+const BUSINESS = { name: 'Essence Engineering Pvt Ltd', address: '', phone: '', email: '', ntn: '',image: ''}
 
 // Builds the starting settings for one form: every option off, no defaults, empty text
 const blankForm = f => ({
