@@ -5,11 +5,20 @@ import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import { rateLimit } from 'express-rate-limit'
 import { PrismaClient } from '@prisma/client'
+import banking from './banking.js'
+import projects from './projects.js'
+import employees from './employees.js'
+import payroll from './payroll.js'
+import expenses from './expenses.js'
+import sales from './sales.js' 
+import purchase from './purchase.js'
+import assets from './assets.js'
+import accounting from './accounting.js'
 
 const prisma = new PrismaClient()
 const app = express()
 app.set('trust proxy', 1) // Render sits behind a proxy; rate limit uses the real visitor IP
-app.use(cors()); app.use(express.json())
+app.use(cors()); app.use(express.json({ limit: '2mb' })) // allows the payslip logo
 
 // Small helpers
 const N = v => Number(v || 0)
@@ -19,6 +28,10 @@ const fail = (m, s = 400) => { const e = new Error(m); e.status = s; throw e }
 // Runs a route and turns errors into clean JSON responses
 const wrap = fn => (req, res) => fn(req, res).catch(e => {
   if (e.code === 'P2002') e = Object.assign(new Error('This value already exists (duplicate email or code)'), { status: 409 })
+  // record not found (update/delete of an id that does not exist)
+  if (e.code === 'P2025') e = Object.assign(new Error('Record not found'), { status: 404 })
+  // record is still referenced by other records
+  if (e.code === 'P2003') e = Object.assign(new Error('This record is used by other records and cannot be deleted'), { status: 409 })
   if (!e.status) console.error(e)
   res.status(e.status || 500).json({ error: e.status ? e.message : 'Something went wrong on the server' })
 })
@@ -38,16 +51,62 @@ async function post(tx, { date, memo, ref, lines }) {
   return tx.journal.create({ data: { date: new Date(date || Date.now()), memo, ref, lines: { create: data } } })
 }
 
-// Roles: admin (all), accountant (books), sales (leads, sales), store (items, purchases)
+// ---- Helpers for contacts and items ----
+const CONTACT_TYPES = ['customer', 'supplier']
+// Who may use which kind of contact: customers = admin, accountant, sales. Suppliers = admin, accountant.
+const canContact = (role, type) => type === 'customer' ? ['admin', 'accountant', 'sales'].includes(role) : ['admin', 'accountant'].includes(role)
+// Empty values ('' / undefined) become null
+const orNull = v => (v === undefined || v === null || v === '' ? null : v)
+// Turns the request body into the fields saved on a contact
+const contactData = b => ({
+  name: String(b.name || '').trim(),
+  phone: orNull(b.phone), email: orNull(b.email),
+  code: orNull(b.code), billingAddress: orNull(b.billingAddress), deliveryAddress: orNull(b.deliveryAddress),
+  creditLimit: orNull(b.creditLimit) === null ? null : Math.max(0, +b.creditLimit || 0),
+  dueDays: orNull(b.dueDays) === null ? null : Math.max(0, Math.round(+b.dueDays || 0)),
+})
+
+const VALUATION = ['First in, first out', 'Average cost']
+// Turns the request body into the fields saved on an item.
+// The new names (unitName, purchasePrice, salesPrice) win; the old names (unit, cost, price) still work.
+const itemData = b => ({
+  name: String(b.name || '').trim(),
+  unit: String(b.unitName ?? b.unit ?? '').trim() || 'pcs',
+  cost: Math.max(0, +(b.purchasePrice ?? b.cost) || 0),
+  price: Math.max(0, +(b.salesPrice ?? b.price) || 0),
+  description: String(b.description || '').trim(),
+  valuationMethod: VALUATION.includes(b.valuationMethod) ? b.valuationMethod : VALUATION[0],
+  customIncomeAccountId: orNull(b.customIncomeAccountId) === null ? null : +b.customIncomeAccountId,
+  customExpenseAccountId: orNull(b.customExpenseAccountId) === null ? null : +b.customExpenseAccountId,
+  lineDescription: String(b.lineDescription || '').trim(),
+  salesDivision: String(b.salesDivision || '').trim(),
+  hideName: !!b.hideName,
+})
+// The custom accounts must exist and be an income / expense account
+async function checkItemAccounts(d) {
+  for (const [id, type, label] of [[d.customIncomeAccountId, 'income', 'income'], [d.customExpenseAccountId, 'expense', 'expense']]) {
+    if (id === null) continue
+    const a = await prisma.account.findUnique({ where: { id } })
+    if (!a || a.type !== type) fail(`Choose a valid ${label} account`)
+  }
+}
+// Adds the field names the new Inventory page expects (the old names stay too)
+const itemOut = i => ({ ...i, unitName: i.unit, purchasePrice: i.cost, salesPrice: i.price, qtyOnHand: i.qty, averageCost: i.cost,
+  qtyToDeliver: 0, qtyToReceive: 0 }) // become real numbers once sales and purchase orders exist
+
+// Roles: admin (everything), accountant (accounts modules, no leads), sales (leads, customers, sales documents)
+// Sales quotes, orders, delivery notes and sales invoices are open to all three roles.
+// Only admin and accountant may edit or delete a sales invoice (checked inside sales.js).
 app.use('/api', (req, res, next) => {
   if (req.path.startsWith('/auth') || req.path.startsWith('/webhooks')) return next()
   auth(req, res, () => {
     const r = req.user.role, p = req.path, w = req.method !== 'GET', is = (...x) => x.includes(r)
     const deny = (p.startsWith('/users') && r !== 'admin')
-      || (/^\/(reports|journal|bank|payments)/.test(p) && !is('admin', 'accountant'))
-      || (w && p.startsWith('/items') && !is('admin', 'accountant', 'store'))
-      || (w && p.startsWith('/leads') && !is('admin', 'accountant', 'sales'))
-      || (w && p.startsWith('/invoices') && !is('admin', 'accountant', req.body?.kind === 'purchase' ? 'store' : 'sales'))
+      || (/^\/(reports|journal|bank|payments|receipts|transfers|reconciliations|employees|payslip|expense|purchase|goods-receipts|fixed-assets|depreciation|capital-accounts|special-accounts|investments)/.test(p) && !is('admin', 'accountant'))
+      || (w && p.startsWith('/projects') && !is('admin', 'accountant'))
+      || (w && p.startsWith('/items') && !is('admin', 'accountant'))
+      || (p.startsWith('/leads') && !is('admin', 'sales'))
+      || (w && p.startsWith('/invoices') && !is('admin', 'accountant', ...(req.body?.kind === 'purchase' ? [] : ['sales'])))
       || (w && p.startsWith('/quotes') && !is('admin', 'accountant', 'sales'))
       || (p.startsWith('/credit-notes') && !is('admin', 'accountant'))
     if (deny) return res.status(403).json({ error: 'Your role cannot do this' })
@@ -68,23 +127,84 @@ app.put('/api/settings', auth, wrap(async (req, res) => {
   res.json(await prisma.setting.update({ where: { id: 1 }, data: { modules: req.body.modules } }))
 }))
 
-// Contacts (customers / suppliers) with running balance
+// ---- Contacts (customers / suppliers) with running balance
 // Cancelled documents are left out of the balance (status: 'active' only)
+// Also returns the new fields, document counts and "overdue" for the Customers / Suppliers pages
 app.get('/api/contacts', auth, wrap(async (req, res) => {
-  const rows = await prisma.contact.findMany({ where: { type: req.query.type }, include: { invoices: { where: { status: 'active' }, select: { total: true } }, payments: { select: { amount: true } }, creditNotes: { select: { total: true } } }, orderBy: { name: 'asc' } })
-  res.json(rows.map(({ invoices, payments, creditNotes, ...c }) => ({ ...c, balance: invoices.reduce((s, i) => s + N(i.total), 0) - payments.reduce((s, p) => s + N(p.amount), 0) - creditNotes.reduce((s, n) => s + N(n.total), 0) })))
+  const type = req.query.type
+  if (!CONTACT_TYPES.includes(type)) fail('type must be customer or supplier')
+  if (!canContact(req.user.role, type)) fail('Your role cannot do this', 403)
+  const rows = await prisma.contact.findMany({ where: { type }, include: {
+    invoices: { where: { status: 'active' }, select: { total: true } },
+    payments: { select: { amount: true, kind: true } },
+    creditNotes: { select: { total: true } },
+    _count: { select: { quotes: true } } }, orderBy: { name: 'asc' } })
+  res.json(rows.map(({ invoices, payments, creditNotes, _count, ...c }) => ({ ...c,
+    balance: invoices.reduce((s, i) => s + N(i.total), 0) - payments.reduce((s, p) => s + N(p.amount), 0) - creditNotes.reduce((s, n) => s + N(n.total), 0),
+    overdue: 0, // will use invoice due dates once the new purchase invoices are built
+    counts: { quotes: _count.quotes, orders: 0, invoices: invoices.length,
+      receipts: payments.filter(p => p.kind === 'receipt').length, payments: payments.filter(p => p.kind === 'payment').length } })))
 }))
+// Saves the new fields too
 app.post('/api/contacts', auth, wrap(async (req, res) => {
-  if (!req.body.name) fail('Name is required')
-  res.json(await prisma.contact.create({ data: { type: req.body.type, name: req.body.name, phone: req.body.phone, email: req.body.email } }))
+  if (!CONTACT_TYPES.includes(req.body.type)) fail('type must be customer or supplier')
+  if (!canContact(req.user.role, req.body.type)) fail('Your role cannot do this', 403)
+  const data = contactData(req.body)
+  if (!data.name) fail('Name is required')
+  res.json(await prisma.contact.create({ data: { type: req.body.type, ...data } }))
+}))
+// Edit a contact (the type cannot change)
+app.put('/api/contacts/:id', auth, wrap(async (req, res) => {
+  const c = await prisma.contact.findUnique({ where: { id: +req.params.id } })
+  if (!c) fail('Contact not found', 404)
+  if (!canContact(req.user.role, c.type)) fail('Your role cannot do this', 403)
+  const data = contactData(req.body)
+  if (!data.name) fail('Name is required')
+  res.json(await prisma.contact.update({ where: { id: c.id }, data }))
+}))
+// Delete a contact, only when no document, payment or claim uses it (CHANGED: sales documents and expense claims are checked too)
+app.delete('/api/contacts/:id', auth, wrap(async (req, res) => {
+  const c = await prisma.contact.findUnique({ where: { id: +req.params.id },
+    include: { _count: { select: { invoices: true, payments: true, quotes: true, creditNotes: true, salesDocs: true, expenseClaims: true } } } })
+  if (!c) fail('Contact not found', 404)
+  if (!canContact(req.user.role, c.type)) fail('Your role cannot do this', 403)
+  if (Object.values(c._count).some(n => n > 0)) fail('This contact has documents or payments and cannot be deleted')
+  await prisma.contact.delete({ where: { id: c.id } })
+  res.json({ ok: true })
 }))
 
-// Inventory items
-app.get('/api/items', auth, wrap(async (req, res) => res.json(await prisma.item.findMany({ orderBy: { name: 'asc' } }))))
+// ---- Inventory items
+// The list also returns the field names the new Inventory page expects
+app.get('/api/items', auth, wrap(async (req, res) => res.json((await prisma.item.findMany({ orderBy: { name: 'asc' } })).map(itemOut))))
+// Only the name is required now (no SKU), and the new fields are saved
 app.post('/api/items', auth, wrap(async (req, res) => {
-  const { sku, name, unit, cost, price, minQty } = req.body
-  if (!sku || !name) fail('SKU and name are required')
-  res.json(await prisma.item.create({ data: { sku, name, unit: unit || 'pcs', cost: +cost || 0, price: +price || 0, minQty: +minQty || 0 } }))
+  const data = itemData(req.body)
+  if (!data.name) fail('Item name is required')
+  await checkItemAccounts(data)
+  const sku = orNull(req.body.sku) === null ? null : String(req.body.sku).trim() // optional, kept for old data
+  res.json(itemOut(await prisma.item.create({ data: { ...data, sku, minQty: Math.max(0, +req.body.minQty || 0) } })))
+}))
+// Edit an item. Stock quantity is not edited here: it only changes through invoices, bills and credit notes.
+app.put('/api/items/:id', auth, wrap(async (req, res) => {
+  const old = await prisma.item.findUnique({ where: { id: +req.params.id } })
+  if (!old) fail('Item not found', 404)
+  const data = itemData(req.body)
+  if (!data.name) fail('Item name is required')
+  await checkItemAccounts(data)
+  res.json(itemOut(await prisma.item.update({ where: { id: old.id }, data })))
+}))
+// Delete an item, only when it has never been used (CHANGED: sales quote / order / delivery note lines are checked too)
+app.delete('/api/items/:id', auth, wrap(async (req, res) => {
+  const id = +req.params.id
+  const item = await prisma.item.findUnique({ where: { id } })
+  if (!item) fail('Item not found', 404)
+  const used = await Promise.all([
+    prisma.stockMove.count({ where: { itemId: id } }), prisma.invoiceLine.count({ where: { itemId: id } }),
+    prisma.quoteLine.count({ where: { itemId: id } }), prisma.creditNoteLine.count({ where: { itemId: id } }),
+    prisma.salesDocLine.count({ where: { itemId: id } })])
+  if (used.some(n => n > 0) || item.qty !== 0) fail('This item is used in documents or has stock, so it cannot be deleted')
+  await prisma.item.delete({ where: { id } })
+  res.json({ ok: true })
 }))
 
 //  Sales invoices & purchase bills: document + stock + journal in ONE transaction
@@ -390,14 +510,14 @@ app.post('/api/webhooks/meta', wrap(async (req, res) => {
   }
 }))
 
-// ---- Users, accounts, bank reconciliation
+// ---- Users and accounts
 app.get('/api/accounts', auth, wrap(async (req, res) => res.json(await prisma.account.findMany({ orderBy: { code: 'asc' } }))))
 app.get('/api/users', auth, wrap(async (req, res) =>
   res.json((await prisma.user.findMany({ orderBy: { id: 'asc' } })).map(({ password, ...u }) => u))))
 app.post('/api/users', auth, wrap(async (req, res) => {
   const { name, email, password, role } = req.body
   if (!name || !email || (password || '').length < 6) fail('Name, email and a password of 6+ characters are required')
-  if (!['admin', 'accountant', 'sales', 'store'].includes(role)) fail('Unknown role')
+  if (!['admin', 'accountant', 'sales'].includes(role)) fail('Unknown role')
   const u = await prisma.user.create({ data: { name, email: email.toLowerCase(), password: await bcrypt.hash(password, 10), role } })
   res.json({ id: u.id })
 }))
@@ -409,9 +529,6 @@ app.get('/api/bank/lines', auth, wrap(async (req, res) => {
   const a = await prisma.account.findUniqueOrThrow({ where: { code: '1000' } })
   res.json(await prisma.journalLine.findMany({ where: { accountId: a.id }, include: { journal: true }, orderBy: { id: 'desc' }, take: 200 }))
 }))
-app.post('/api/bank/reconcile', auth, wrap(async (req, res) => {
-  await prisma.journalLine.updateMany({ where: { id: { in: (req.body.ids || []).map(Number) } }, data: { reconciled: !!req.body.value } }); res.json({ ok: true })
-}))
 
 // ---- Dashboard (sales and purchases totals count active documents only)
 app.get('/api/dashboard', auth, wrap(async (req, res) => {
@@ -422,8 +539,18 @@ app.get('/api/dashboard', auth, wrap(async (req, res) => {
   res.json({
     sales: g(inv, 'sale', 'total') - N(cn._sum.total), purchases: g(inv, 'purchase', 'total'),
     receivable: g(inv, 'sale', 'total') - g(pay, 'receipt', 'amount') - N(cn._sum.total), payable: g(inv, 'purchase', 'total') - g(pay, 'payment', 'amount'),
-    cash: b.filter(a => a.code === '1000').reduce((s, a) => s + a.debit - a.credit, 0),
+    cash: b.filter(a => a.code >= '1000' && a.code < '1100').reduce((s, a) => s + a.debit - a.credit, 0),
     lowStock: items.filter(i => i.qty <= i.minQty), leads: Object.fromEntries(leads.map(l => [l.stage, l._count])) })
 }))
 
+// ---- Modules (each file adds its own routes)
+banking(app, { prisma, wrap, fail, post, auth, N, r2, balanceOf })
+projects(app, { prisma, wrap, fail, auth, N, r2 })
+employees(app, { prisma, wrap, fail, auth, N, r2 })
+payroll(app, { prisma, wrap, fail, post, auth, N, r2 }) // CHANGED: post added, in case payslips post to the books
+expenses(app, { prisma, wrap, fail, post, auth, N, r2 })
+sales(app, { prisma, wrap, fail, post, auth, N, r2, balanceOf }) // NEW
+purchase(app, { prisma, wrap, fail, post, auth, N, r2, balanceOf })
+assets(app, { prisma, wrap, fail, post, auth, N, r2 })
+accounting(app, { prisma, wrap, fail, auth, N, r2 })
 app.listen(process.env.PORT || 4000, () => console.log('API running on', process.env.PORT || 4000))

@@ -1,12 +1,13 @@
 // src/Transfers.jsx
 // Inter Account Transfers and Bank Reconciliations (Manager.io style).
-// Expected API (to be built later):
+// API (built in server/src/banking.js):
 //   GET/POST/PUT/DELETE /transfers
 //        record: { id, number, date, reference, description, amount, fromId, toId, from: {name}, to: {name} }
 //   GET/POST/DELETE     /reconciliations
 //        record: { id, date, statementBalance, bankId, bankAccount: {name} }
 //   GET /bank-accounts/:id/lines
 //        -> uncleared lines: [{ id, date, memo, amount }]  (amount is + for money in, - for money out)
+//   GET /bank-accounts -> [{ id, name, balance, clearedBalance, ... }]
 import { useEffect, useState } from 'react'
 import { api } from './api'
 import { useLoad, money, fmtDate, today, Btn, BtnLight, Title, Err, Field, Table, inp } from './ui'
@@ -16,7 +17,7 @@ import { useLoad, money, fmtDate, today, Btn, BtnLight, Title, Err, Field, Table
 // =====================================================
 export function Transfers() {
   const [rows, reload] = useLoad('/transfers')
-  const [banks] = useLoad('/bank-accounts')
+  const [banks, reloadBanks] = useLoad('/bank-accounts')
 
   const blank = () => ({ date: today(), reference: '', description: '', fromId: '', amount: '', toId: '' })
   const [view, setView] = useState('list') // 'list' | 'form'
@@ -24,11 +25,14 @@ export function Transfers() {
   const [editing, setEditing] = useState(null)
   const [search, setSearch] = useState('')
   const [err, setErr] = useState('')
+  const [saving, setSaving] = useState(false) // stops a double click from saving twice
 
   const set = patch => setF({ ...f, ...patch })
 
-  const openNew = () => { setF(blank()); setEditing(null); setErr(''); setView('form') }
+  // Bank list is reloaded so a bank account added on the other page shows up here
+  const openNew = () => { reloadBanks(); setF(blank()); setEditing(null); setErr(''); setView('form') }
   const openEdit = r => {
+    reloadBanks()
     setF({
       date: String(r.date).slice(0, 10), reference: r.reference || '', description: r.description || '',
       fromId: String(r.fromId ?? r.from?.id ?? ''), amount: r.amount ?? '', toId: String(r.toId ?? r.to?.id ?? ''),
@@ -37,16 +41,19 @@ export function Transfers() {
   }
 
   const save = async addAnother => {
+    if (saving) return
     if (!f.fromId || !f.toId) return setErr('Choose both accounts')
     if (f.fromId === f.toId) return setErr('The two accounts must be different')
     if (!(Number(f.amount) > 0)) return setErr('Enter an amount above zero')
     const body = { date: f.date, reference: f.reference, description: f.description, fromId: +f.fromId, toId: +f.toId, amount: Number(f.amount) }
+    setSaving(true)
     try {
       if (editing) await api('/transfers/' + editing.id, { method: 'PUT', body })
       else await api('/transfers', { method: 'POST', body })
       reload()
       if (addAnother && !editing) { setF(blank()); setErr('') } else setView('list')
     } catch (e) { setErr(e.message) }
+    finally { setSaving(false) }
   }
 
   const remove = async r => {
@@ -69,7 +76,7 @@ export function Transfers() {
             <option value="">Choose account</option>{banks?.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
           </select>
         </Field>
-        <Field label="Amount"><input className={inp} type="number" min="0" value={f.amount} onChange={e => set({ amount: e.target.value })} /></Field>
+        <Field label="Amount"><input className={inp} type="number" min="0" step="0.01" value={f.amount} onChange={e => set({ amount: e.target.value })} /></Field>
         <Field label="Received in">
           <select className={inp} value={f.toId} onChange={e => set({ toId: e.target.value })}>
             <option value="">Choose account</option>{banks?.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
@@ -78,7 +85,7 @@ export function Transfers() {
       </div>
       <Err e={err} />
       <div className="flex gap-2">
-        <Btn onClick={() => save(false)}>{editing ? 'Save changes' : 'Create'}</Btn>
+        <Btn onClick={() => save(false)}>{saving ? 'Saving...' : editing ? 'Save changes' : 'Create'}</Btn>
         {!editing && <BtnLight onClick={() => save(true)}>Create & add another</BtnLight>}
         <BtnLight onClick={() => setView('list')}>Cancel</BtnLight>
       </div>
@@ -119,13 +126,14 @@ export function Transfers() {
 // =====================================================
 export function Reconciliations() {
   const [rows, reload] = useLoad('/reconciliations')
-  const [banks] = useLoad('/bank-accounts')
+  const [banks, reloadBanks] = useLoad('/bank-accounts')
 
   const [view, setView] = useState('list') // 'list' | 'form'
   const [f, setF] = useState({ date: today(), bankId: '', statementBalance: '' })
   const [lines, setLines] = useState([])   // uncleared lines of the chosen account
   const [ticked, setTicked] = useState([]) // ids of lines ticked as cleared
   const [err, setErr] = useState('')
+  const [saving, setSaving] = useState(false)
 
   const set = patch => setF({ ...f, ...patch })
 
@@ -138,24 +146,30 @@ export function Reconciliations() {
 
   const toggle = id => setTicked(ticked.includes(id) ? ticked.filter(x => x !== id) : [...ticked, id])
 
-  // Sum of the ticked lines; the statement balance should match it
-  const cleared = lines.filter(l => ticked.includes(l.id)).reduce((s, l) => s + Number(l.amount), 0)
-  const diff = f.statementBalance === '' ? null : Number(f.statementBalance) - cleared
+  // Lines cleared in earlier reconciliations + the ones ticked now
+  const before = Number(banks?.find(b => String(b.id) === String(f.bankId))?.clearedBalance || 0)
+  const cleared = before + lines.filter(l => ticked.includes(l.id)).reduce((s, l) => s + Number(l.amount), 0)
+  const diff = f.statementBalance === '' ? null : Math.round((Number(f.statementBalance) - cleared) * 100) / 100
 
-  const openNew = () => { setF({ date: today(), bankId: '', statementBalance: '' }); setLines([]); setTicked([]); setErr(''); setView('form') }
+  // Bank list is reloaded so the cleared balance is up to date
+  const openNew = () => { reloadBanks(); setF({ date: today(), bankId: '', statementBalance: '' }); setLines([]); setTicked([]); setErr(''); setView('form') }
 
   const save = async () => {
+    if (saving) return
     if (!f.bankId) return setErr('Choose a bank account')
     if (f.statementBalance === '') return setErr('Enter the statement balance')
+    if (!ticked.length) return setErr('Tick at least one transaction')
+    setSaving(true)
     try {
       await api('/reconciliations', { method: 'POST', body: { date: f.date, bankId: +f.bankId, statementBalance: Number(f.statementBalance), lineIds: ticked } })
-      reload(); setView('list'); setErr('')
+      reload(); reloadBanks(); setView('list'); setErr('')
     } catch (e) { setErr(e.message) }
+    finally { setSaving(false) }
   }
 
   const remove = async r => {
     if (!confirm('Delete this reconciliation? Its lines become uncleared again.')) return
-    try { await api('/reconciliations/' + r.id, { method: 'DELETE' }); setErr(''); reload() } catch (e) { setErr(e.message) }
+    try { await api('/reconciliations/' + r.id, { method: 'DELETE' }); setErr(''); reload(); reloadBanks() } catch (e) { setErr(e.message) }
   }
 
   // ---------- Form ----------
@@ -169,7 +183,7 @@ export function Reconciliations() {
             <option value="">Choose account</option>{banks?.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
           </select>
         </Field>
-        <Field label="Statement balance"><input className={inp} type="number" value={f.statementBalance} onChange={e => set({ statementBalance: e.target.value })} /></Field>
+        <Field label="Statement balance"><input className={inp} type="number" step="0.01" value={f.statementBalance} onChange={e => set({ statementBalance: e.target.value })} /></Field>
       </div>
 
       {f.bankId && (<>
@@ -183,11 +197,12 @@ export function Reconciliations() {
           ]}
           rows={lines} empty="No uncleared transactions for this account."
         />
-        <div className="flex items-center gap-4 text-sm">
-          <span>Ticked as cleared: <b>{money(cleared)}</b></span>
+        <div className="flex flex-wrap items-center gap-4 text-sm">
+          <span>Cleared before: <b>{money(before)}</b></span>
+          <span>Ticked as cleared: <b>{money(cleared - before)}</b></span>
           {diff !== null && (
-            <span className={'font-medium ' + (diff === 0 ? 'text-green-700' : 'text-red-700')}>
-              {diff === 0 ? 'Reconciled. Your books match the bank.' : `Difference of ${money(diff)}. Check for missing or unticked lines.`}
+            <span className={'font-medium ' + (Math.abs(diff) < 0.005 ? 'text-green-700' : 'text-red-700')}>
+              {Math.abs(diff) < 0.005 ? 'Reconciled. Your books match the bank.' : `Difference of ${money(diff)}. Check for missing or unticked lines.`}
             </span>
           )}
         </div>
@@ -195,7 +210,7 @@ export function Reconciliations() {
 
       <Err e={err} />
       <div className="flex gap-2">
-        <Btn onClick={save}>Create</Btn>
+        <Btn onClick={save}>{saving ? 'Saving...' : 'Create'}</Btn>
         <BtnLight onClick={() => setView('list')}>Cancel</BtnLight>
       </div>
     </section>

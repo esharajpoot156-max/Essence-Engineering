@@ -25,6 +25,9 @@ model Account {
   name  String
   type  String
   lines JournalLine[]
+  bankAccount  BankAccount?   // NEW: set when this account belongs to a bank or cash account
+  paymentLines PaymentLine[]  // NEW
+  claimLines   ExpenseClaimLine[] 
 }
 model Journal {
   id    Int           @id @default(autoincrement())
@@ -40,29 +43,52 @@ model JournalLine {
   debit     Decimal  @default(0) @db.Decimal(14, 2)
   credit    Decimal  @default(0) @db.Decimal(14, 2)
   reconciled Boolean @default(false)
+  reconciliationId Int?                                   // NEW: which reconciliation cleared this line
   journal   Journal  @relation(fields: [journalId], references: [id], onDelete: Cascade)
   account   Account  @relation(fields: [accountId], references: [id])
+  reconciliation Reconciliation? @relation(fields: [reconciliationId], references: [id], onDelete: SetNull) // NEW
 }
+
+// Contact: a customer or a supplier (type = "customer" | "supplier")
 model Contact {
   id       Int       @id @default(autoincrement())
   type     String
   name     String
   phone    String?
   email    String?
+  // Manager.io-style fields (all optional)
+  code            String?                              // short code
+  creditLimit     Decimal? @db.Decimal(14, 2)          // null = no limit
+  billingAddress  String?                              // suppliers use this as their single address
+  deliveryAddress String?                              // customers only
+  dueDays         Int?                                 // default payment terms for sales invoices (net days)
   invoices Invoice[]
   payments Payment[]
   quotes      Quote[]
   creditNotes CreditNote[]
+  expenseClaims ExpenseClaim[]
+  salesDocs     SalesDoc[] 
 }
+
+// Item: an inventory item
+// Note: "cost" is the purchase price and "price" is the sales price. The API also returns them as
+// purchasePrice and salesPrice for the new pages.
 model Item {
   id     Int         @id @default(autoincrement())
-  sku    String      @unique
+  sku    String?     @unique   // no longer required (the client does not want SKUs). Dropped in a later cleanup.
   name   String
   unit   String      @default("pcs")
   cost   Decimal     @default(0) @db.Decimal(14, 2)
   price  Decimal     @default(0) @db.Decimal(14, 2)
   qty    Int         @default(0)
-  minQty Int         @default(0)
+  minQty Int         @default(0)   // no longer used by the new pages. Dropped in a later cleanup.
+  description            String  @default("")                  // long description shown in the list
+  valuationMethod        String  @default("First in, first out")
+  customIncomeAccountId  Int?                                  // overrides the default income account
+  customExpenseAccountId Int?                                  // overrides the default expense account
+  lineDescription        String  @default("")                  // autofilled on document lines
+  salesDivision          String  @default("")
+  hideName               Boolean @default(false)               // hide the item name on printed documents
   moves  StockMove[]
 }
 model StockMove {
@@ -84,6 +110,18 @@ model Invoice {
   taxRate   Decimal       @default(0) @db.Decimal(5, 2)
   status      String        @default("active")
   cancelledAt DateTime?
+  // NEW: Manager.io-style fields (all optional or with a default)
+  reference       String?
+  address         String?
+  description     String?
+  subtotal        Decimal   @default(0) @db.Decimal(14, 2)   // old rows have 0: the server falls back to total - tax
+  rounding        Decimal   @default(0) @db.Decimal(14, 2)
+  fixedTotal      Decimal?  @db.Decimal(14, 2)
+  netDays         Int?
+  dueDate         DateTime?
+  withholdingRate Decimal   @default(0) @db.Decimal(5, 2)
+  sourceKind      String?                                    // "delivery" | "order" | "quote" when created from one
+  sourceId        Int?
   contact   Contact       @relation(fields: [contactId], references: [id])
   lines     InvoiceLine[]
   creditNotes CreditNote[]
@@ -95,8 +133,16 @@ model InvoiceLine {
   description String  @default("")
   qty         Int
   price       Decimal @db.Decimal(14, 2)
+  accountId   Int?                                   // NEW: overrides the default income account
+  projectId   Int?                                   // NEW
+  discount    Decimal @default(0) @db.Decimal(5, 2)  // NEW: line discount %
   invoice     Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
 }
+
+// Payment: a receipt (money in) or a payment (money out).
+// "amount" = the part applied to the contact's balance (lines posted to Accounts Receivable / Payable).
+// "total"  = the full amount that moved through the bank account.
+// Rows created by the old quick "record receipt / payment" boxes have no number, bank or lines (total = 0).
 model Payment {
   id        Int      @id @default(autoincrement())
   kind      String
@@ -104,7 +150,65 @@ model Payment {
   amount    Decimal  @db.Decimal(14, 2)
   date      DateTime
   contact   Contact  @relation(fields: [contactId], references: [id])
+  number      String?  @unique                          // NEW: REC-0001 / PAY-0001
+  reference   String?                                   // NEW
+  description String?                                   // NEW
+  bankId      Int?                                      // NEW
+  total       Decimal  @default(0) @db.Decimal(14, 2)   // NEW
+  bank        BankAccount?  @relation(fields: [bankId], references: [id])  // NEW
+  lines       PaymentLine[]                             // NEW
 }
+// NEW: one line of a receipt or payment
+model PaymentLine {
+  id          Int     @id @default(autoincrement())
+  paymentId   Int
+  accountId   Int
+  description String  @default("")
+  amount      Decimal @db.Decimal(14, 2)
+  projectId   Int?                      // becomes a real relation when Projects are built
+  payment     Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  account     Account @relation(fields: [accountId], references: [id])
+  project     Project? @relation(fields: [projectId], references: [id])
+}
+
+// NEW: a bank or cash account. Each one has its own account in the chart of accounts.
+model BankAccount {
+  id          Int      @id @default(autoincrement())
+  name        String
+  code        String?
+  iban        String?
+  pending     Boolean  @default(false)       // can have pending transactions
+  creditLimit Decimal? @db.Decimal(14, 2)
+  accountId   Int      @unique
+  account     Account  @relation(fields: [accountId], references: [id])
+  payments        Payment[]
+  transfersOut    Transfer[]       @relation("TransferFrom")
+  transfersIn     Transfer[]       @relation("TransferTo")
+  reconciliations Reconciliation[]
+}
+// NEW: money moved between two of the company's own accounts
+model Transfer {
+  id          Int      @id @default(autoincrement())
+  number      String   @unique              // TRF-0001
+  date        DateTime
+  reference   String?
+  description String?
+  amount      Decimal  @db.Decimal(14, 2)
+  fromId      Int
+  toId        Int
+  from        BankAccount @relation("TransferFrom", fields: [fromId], references: [id])
+  to          BankAccount @relation("TransferTo", fields: [toId], references: [id])
+}
+// NEW: a bank reconciliation (the journal lines it cleared point back to it)
+model Reconciliation {
+  id               Int      @id @default(autoincrement())
+  date             DateTime
+  bankId           Int
+  statementBalance Decimal  @db.Decimal(14, 2)
+  bank             BankAccount @relation(fields: [bankId], references: [id])
+  lines            JournalLine[]
+}
+
 model Lead {
   id        Int      @id @default(autoincrement())
   name      String
@@ -165,4 +269,161 @@ model CreditNoteLine {
   qty          Int
   price        Decimal    @db.Decimal(14, 2)
   creditNote   CreditNote @relation(fields: [creditNoteId], references: [id], onDelete: Cascade)
+}
+model Project {
+  id           Int           @id @default(autoincrement())
+  name         String
+  code         String?
+  paymentLines PaymentLine[]
+}
+
+model Employee {
+  id          Int       @id @default(autoincrement())
+  name        String
+  code        String?
+  jobTitle    String?
+  phone       String?
+  email       String?
+  joiningDate DateTime?
+  basicSalary Decimal   @default(0) @db.Decimal(14, 2)
+  address     String?
+  notes       String?
+  payslips    Payslip[]
+  expenseClaims ExpenseClaim[]
+}
+
+// NEW: an item that can be chosen on a payslip line.
+// kind = "earning" | "deduction" | "contribution" (fills the three dropdowns)
+model PayslipItem {
+  id    Int           @id @default(autoincrement())
+  kind  String
+  name  String
+  lines PayslipLine[]
+
+  @@unique([kind, name])
+}
+
+// NEW: one payslip for one employee
+// gross, totalDeductions and net are calculated and saved by the server.
+model Payslip {
+  id              Int           @id @default(autoincrement())
+  date            DateTime
+  reference       String?
+  description     String?
+  employeeId      Int
+  showTotals      Boolean       @default(false)   // show "totals for the period" on the printout
+  customTitle     String?
+  footer          String?
+  image           String?                         // optional logo for this payslip
+  gross           Decimal       @default(0) @db.Decimal(14, 2)
+  totalDeductions Decimal       @default(0) @db.Decimal(14, 2)
+  net             Decimal       @default(0) @db.Decimal(14, 2)
+  employee        Employee      @relation(fields: [employeeId], references: [id])
+  lines           PayslipLine[]
+}
+
+// NEW: one line of a payslip. units and unitPrice are only used by earnings.
+model PayslipLine {
+  id          Int          @id @default(autoincrement())
+  payslipId   Int
+  section     String       // "earning" | "deduction" | "contribution"
+  itemId      Int?
+  description String       @default("")
+  units       Decimal?     @db.Decimal(14, 2)
+  unitPrice   Decimal?     @db.Decimal(14, 2)
+  amount      Decimal      @db.Decimal(14, 2)
+  payslip     Payslip      @relation(fields: [payslipId], references: [id], onDelete: Cascade)
+  item        PayslipItem? @relation(fields: [itemId], references: [id])
+}
+// NEW: Expense Claim - kharcha jo staff ne apni jeb se kiya
+// total server calculate karta hai (qty x price ka sum)
+model ExpenseClaim {
+  id        Int                @id @default(autoincrement())
+  number    String             @unique          // EXP-0001
+  date      DateTime
+  reference String?
+  paidById  Int
+  payeeId   Int?
+  total     Decimal            @default(0) @db.Decimal(14, 2)
+  paidBy    Employee           @relation(fields: [paidById], references: [id])
+  payee     Contact?           @relation(fields: [payeeId], references: [id])
+  lines     ExpenseClaimLine[]
+}
+
+// NEW: claim ki ek line
+model ExpenseClaimLine {
+  id          Int          @id @default(autoincrement())
+  claimId     Int
+  accountId   Int
+  description String       @default("")
+  qty         Decimal      @default(1) @db.Decimal(14, 2)
+  price       Decimal      @db.Decimal(14, 2)
+  claim       ExpenseClaim @relation(fields: [claimId], references: [id], onDelete: Cascade)
+  account     Account      @relation(fields: [accountId], references: [id])
+}
+// NEW: Sales Quote / Sales Order / Delivery Note (kind = "quote" | "order" | "delivery")
+// No stock or accounting effect. Numbers: QUO-0001, SO-0001, DN-0001.
+model SalesDoc {
+  id              Int            @id @default(autoincrement())
+  kind            String
+  number          String         @unique
+  date            DateTime
+  reference       String?
+  contactId       Int
+  address         String?
+  description     String?
+  taxRate         Decimal        @default(0) @db.Decimal(5, 2)
+  subtotal        Decimal        @default(0) @db.Decimal(14, 2)
+  tax             Decimal        @default(0) @db.Decimal(14, 2)
+  rounding        Decimal        @default(0) @db.Decimal(14, 2)
+  total           Decimal        @default(0) @db.Decimal(14, 2)
+  fixedTotal      Decimal?       @db.Decimal(14, 2)
+  withholdingRate Decimal        @default(0) @db.Decimal(5, 2)
+  rfq             Boolean        @default(false)
+  validDays       Int?                                    // quotes only
+  expiryDate      DateTime?                               // quotes only
+  status          String         @default("open")         // quotes: open | accepted | rejected
+  sourceKind      String?                                 // the document this one was created from
+  sourceId        Int?
+  contact         Contact        @relation(fields: [contactId], references: [id])
+  lines           SalesDocLine[]
+
+  @@index([kind])
+}
+
+model SalesDocLine {
+  id          Int      @id @default(autoincrement())
+  docId       Int
+  itemId      Int?
+  description String   @default("")
+  qty         Int
+  price       Decimal  @default(0) @db.Decimal(14, 2)
+  discount    Decimal  @default(0) @db.Decimal(5, 2)
+  doc         SalesDoc @relation(fields: [docId], references: [id], onDelete: Cascade)
+}
+// Fixed asset record. Posts nothing to the books by itself.
+model FixedAsset {
+  id              Int            @id @default(autoincrement())
+  code            String?
+  name            String
+  description     String?
+  purchaseDate    DateTime?
+  cost            Decimal        @default(0) @db.Decimal(14, 2)
+  residualValue   Decimal        @default(0) @db.Decimal(14, 2)
+  usefulLifeYears Decimal        @default(0) @db.Decimal(5, 2)
+  method          String         @default("straight")   // "straight" | "none"
+  notes           String?
+  depreciations   Depreciation[]
+}
+
+// One depreciation entry for one asset (DEP-0001). Posts Dr Depreciation Expense, Cr Accumulated Depreciation.
+model Depreciation {
+  id          Int        @id @default(autoincrement())
+  number      String     @unique
+  date        DateTime
+  reference   String?
+  description String?
+  assetId     Int
+  amount      Decimal    @db.Decimal(14, 2)
+  asset       FixedAsset @relation(fields: [assetId], references: [id])
 }

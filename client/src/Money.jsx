@@ -1,11 +1,11 @@
 // src/Money.jsx
 // Receipts (money in) and Payments (money out), Manager.io style.
 // One shared page component; the two exports below only choose the labels and API path.
-// Expected API (to be built later), where PATH is /receipts or /bank-payments:
-//   GET    PATH        -> [{ id, number, date, reference, contact, bankAccount, description, total, lines: [...] }]
+// API (built in server/src/banking.js), where PATH is /receipts or /bank-payments:
+//   GET    PATH        -> [{ id, number, legacy, date, reference, contact, bankAccount, description, total, lines: [...] }]
 //   POST   PATH        -> create
-//   PUT    PATH/:id    -> update
-//   DELETE PATH/:id    -> delete
+//   PUT    PATH/:id    -> update   (not allowed for legacy rows or reconciled transactions)
+//   DELETE PATH/:id    -> delete   (same rules)
 // Also reads: /bank-accounts, /contacts?type=customer, /contacts?type=supplier, /accounts, /projects
 import { useState } from 'react'
 import { api } from './api'
@@ -19,11 +19,11 @@ const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '
 const KINDS = {
   receipt: {
     form: 'receipt', path: '/receipts', title: 'Receipts', one: 'Receipt',
-    who: 'Paid by', bank: 'Received in', hint: 'Money coming in.',
+    who: 'Paid by', bank: 'Received in', hint: 'Money coming in.', first: 'customer',
   },
   payment: {
     form: 'payment', path: '/bank-payments', title: 'Payments', one: 'Payment',
-    who: 'Payee', bank: 'Paid from', hint: 'Money going out.',
+    who: 'Payee', bank: 'Paid from', hint: 'Money going out.', first: 'supplier',
   },
 }
 
@@ -50,17 +50,21 @@ function MoneyPage({ kind }) {
   const fs = useFormSettings(k.form) // optional fields and defaults set in Settings
 
   const [rows, reload] = useLoad(k.path)
-  const [banks] = useLoad('/bank-accounts')
+  const [banks, reloadBanks] = useLoad('/bank-accounts')
   const [customers] = useLoad('/contacts?type=customer')
   const [suppliers] = useLoad('/contacts?type=supplier')
   const [accounts] = useLoad('/accounts')
   const [projects] = useLoad('/projects')
 
-  // Both customers and suppliers can appear as the contact
-  const contacts = [...(customers || []), ...(suppliers || [])]
+  // Both customers and suppliers can appear as the contact.
+  // The kind that normally belongs on this page (customers for receipts, suppliers for payments) is listed first.
+  const groups = [
+    ['Customers', customers || [], 'customer'],
+    ['Suppliers', suppliers || [], 'supplier'],
+  ].sort((a, b) => (b[2] === k.first) - (a[2] === k.first))
 
-  // The default account comes from Settings (code or name). If nothing matches, the first account is used.
-  // Manager.io uses "Suspense" as the default; we use the first account until one is chosen.
+  // The default account comes from Settings (code or name).
+  // If nothing matches the line stays empty, and the server posts it to the Suspense account.
   const defaultAccountId = () => {
     const want = String(fs.defaults.account || '').trim().toLowerCase()
     const hit = want && accounts?.find(a => String(a.code).toLowerCase() === want || a.name.toLowerCase() === want)
@@ -75,13 +79,16 @@ function MoneyPage({ kind }) {
   const [current, setCurrent] = useState(null) // record shown on the view page
   const [search, setSearch] = useState('')
   const [err, setErr] = useState('')
+  const [saving, setSaving] = useState(false) // stops a double click from saving twice
 
   const set = patch => setF({ ...f, ...patch })
   const setLine = (i, p) => set({ lines: f.lines.map((l, j) => (j === i ? { ...l, ...p } : l)) })
   const total = f.lines.reduce((s, l) => s + (Number(l.amount) || 0), 0)
 
-  const openNew = () => { setF(blank()); setEditing(null); setErr(''); setView('form') }
+  // Bank list is reloaded so a bank account added on the other page shows up here
+  const openNew = () => { reloadBanks(); setF(blank()); setEditing(null); setErr(''); setView('form') }
   const openEdit = r => {
+    reloadBanks()
     setF({
       date: String(r.date).slice(0, 10), reference: r.reference || '', contactId: String(r.contactId ?? r.contact?.id ?? ''),
       bankId: String(r.bankId ?? r.bankAccount?.id ?? ''), description: r.description || '',
@@ -94,6 +101,7 @@ function MoneyPage({ kind }) {
 
   // Saves the form. addAnother = true keeps a fresh form open (new records only).
   const save = async addAnother => {
+    if (saving) return
     if (!f.contactId) return setErr(`Choose the ${k.who.toLowerCase()}`)
     if (!f.bankId) return setErr('Choose a bank or cash account')
     const lines = f.lines.filter(l => Number(l.amount) > 0).map(l => ({
@@ -101,12 +109,14 @@ function MoneyPage({ kind }) {
     }))
     if (!lines.length) return setErr('Add at least one line with an amount')
     const body = { date: f.date, reference: f.reference, contactId: +f.contactId, bankId: +f.bankId, description: f.description, lines, total }
+    setSaving(true)
     try {
       if (editing) await api(`${k.path}/${editing.id}`, { method: 'PUT', body })
       else await api(k.path, { method: 'POST', body })
       reload()
       if (addAnother && !editing) { setF(blank()); setErr('') } else setView('list')
     } catch (e) { setErr(e.message) }
+    finally { setSaving(false) }
   }
 
   const remove = async r => {
@@ -123,7 +133,10 @@ function MoneyPage({ kind }) {
         <Field label="Reference (optional)"><input className={inp} value={f.reference} onChange={e => set({ reference: e.target.value })} /></Field>
         <Field label={k.who}>
           <select className={inp} value={f.contactId} onChange={e => set({ contactId: e.target.value })}>
-            <option value="">Choose contact</option>{contacts.map(c => <option key={c.type + c.id} value={c.id}>{c.name}</option>)}
+            <option value="">Choose contact</option>
+            {groups.map(([label, list]) => list.length > 0 && (
+              <optgroup key={label} label={label}>{list.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</optgroup>
+            ))}
           </select>
         </Field>
         <Field label={k.bank}>
@@ -144,7 +157,7 @@ function MoneyPage({ kind }) {
             {fs.options.description && (
               <input className={inp + ' col-span-12 sm:col-span-3'} placeholder="Description" value={l.description} onChange={e => setLine(i, { description: e.target.value })} />
             )}
-            <input className={inp + (fs.options.description ? ' col-span-6 sm:col-span-2' : ' col-span-6 sm:col-span-4')} type="number" min="0" placeholder="Amount" aria-label="Amount" value={l.amount} onChange={e => setLine(i, { amount: e.target.value })} />
+            <input className={inp + (fs.options.description ? ' col-span-6 sm:col-span-2' : ' col-span-6 sm:col-span-4')} type="number" min="0" step="0.01" placeholder="Amount" aria-label="Amount" value={l.amount} onChange={e => setLine(i, { amount: e.target.value })} />
             <select className={inp + ' col-span-6 sm:col-span-3'} aria-label="Project" value={l.projectId} onChange={e => setLine(i, { projectId: e.target.value })}>
               <option value="">No project</option>{projects?.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
             </select>
@@ -159,7 +172,7 @@ function MoneyPage({ kind }) {
 
       <Err e={err} />
       <div className="flex gap-2">
-        <Btn onClick={() => save(false)}>{editing ? 'Save changes' : 'Create'}</Btn>
+        <Btn onClick={() => save(false)}>{saving ? 'Saving...' : editing ? 'Save changes' : 'Create'}</Btn>
         {!editing && <BtnLight onClick={() => save(true)}>Create & add another</BtnLight>}
         <BtnLight onClick={() => setView('list')}>Cancel</BtnLight>
       </div>
@@ -170,14 +183,17 @@ function MoneyPage({ kind }) {
   if (view === 'view' && current) return (<>
     <Title hint={fmtDate(current.date)}
       right={<>
-        <BtnLight onClick={() => openEdit(current)}>Edit</BtnLight>
+        {!current.legacy && <BtnLight onClick={() => openEdit(current)}>Edit</BtnLight>}
         <BtnLight onClick={() => printRecord(current, k, cfg)}>Print / PDF</BtnLight>
-        <BtnLight onClick={() => remove(current)}>Delete</BtnLight>
+        {!current.legacy && <BtnLight onClick={() => remove(current)}>Delete</BtnLight>}
         <BtnLight onClick={() => setView('list')}>Back</BtnLight>
       </>}>
       {k.one} {current.number}
     </Title>
     <section className="bg-white border border-navy/10 rounded p-4 space-y-3 max-w-3xl text-sm">
+      {current.legacy && (
+        <p className="text-navy/60">This {k.one.toLowerCase()} was recorded from the Customers or Suppliers page, so it has no lines and cannot be edited here.</p>
+      )}
       <p><b>{k.who}:</b> {current.contact?.name}</p>
       <p><b>{k.bank}:</b> {current.bankAccount?.name}</p>
       {current.reference && <p><b>Reference:</b> {current.reference}</p>}
@@ -209,8 +225,12 @@ function MoneyPage({ kind }) {
         ['Actions', r => (
           <span className="inline-flex gap-3">
             <button className="text-gold font-medium" onClick={() => { setCurrent(r); setView('view') }}>View</button>
-            <button className="text-gold font-medium" onClick={() => openEdit(r)}>Edit</button>
-            <button className="text-red-700 font-medium" onClick={() => remove(r)}>Delete</button>
+            {r.legacy
+              ? <span className="text-navy/50 text-xs">Old record</span>
+              : <>
+                  <button className="text-gold font-medium" onClick={() => openEdit(r)}>Edit</button>
+                  <button className="text-red-700 font-medium" onClick={() => remove(r)}>Delete</button>
+                </>}
           </span>
         )],
       ]}

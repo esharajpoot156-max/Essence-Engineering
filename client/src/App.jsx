@@ -78,12 +78,7 @@ const GROUPS = [
     ['/aging-customers', 'Customer Aging', 'reports', BOOKS],
     ['/aging-suppliers', 'Supplier Aging', 'reports', BOOKS],
     ['/journal', 'Journal', 'reports', BOOKS]]],
-  // Remove this group once the backend for the new pages is built
-  ['Old pages', [
-    ['/sales', 'Sales (old)', 'sales', SALES],
-    ['/purchases', 'Purchase bills (old)', 'purchases', BUYING],
-    ['/quotes', 'Quotes (old)', 'sales', SALES],
-    ['/bank', 'Bank (old)', 'reports', BOOKS]]],
+
   ['Admin', [
     ['/team', 'Team', null, ['admin']],
     ['/settings', 'Settings', null, ['admin']]]],
@@ -233,7 +228,6 @@ export default function App() {
               <Route path="/sales" element={guard('/sales', <Documents kind="sale" />)} />
               <Route path="/purchases" element={guard('/purchases', <Documents kind="purchase" />)} />
               <Route path="/quotes" element={guard('/quotes', <Quotes />)} />
-              <Route path="/bank" element={guard('/bank', <Bank />)} />
 
               {/* Admin */}
               <Route path="/team" element={guard('/team', <Team />)} />

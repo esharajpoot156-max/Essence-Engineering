@@ -126,6 +126,7 @@ export default function Employees() {
         {pay.data && (
           <dl className="mt-3 text-sm space-y-1">
             <div className="flex justify-between"><dt className="text-ink/70">Payslips total</dt><dd>{money(pay.data.payslips)}</dd></div>
+            <div className="flex justify-between"><dt className="text-ink/70">Expense claims</dt><dd>{money(pay.data.claims)}</dd></div>
             <div className="flex justify-between"><dt className="text-ink/70">Paid so far</dt><dd>{money(pay.data.paid)}</dd></div>
             <div className="flex justify-between border-t border-navy/10 pt-1 font-semibold">
               <dt>Amount to pay</dt><dd>{money(pay.data.balance)}</dd>
