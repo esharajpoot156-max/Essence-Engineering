@@ -18,6 +18,7 @@ model User {
   email    String @unique
   password String
   role     String @default("admin")
+  leads    Lead[]
 }
 model Account {
   id    Int           @id @default(autoincrement())
@@ -220,6 +221,8 @@ model Lead {
   notes     String?
   metaId    String?  @unique
   createdAt DateTime @default(now())
+  assignedToId Int?   // NEW: the user this lead is assigned to (empty = not assigned yet)
+  assignedTo   User?  @relation(fields: [assignedToId], references: [id], onDelete: SetNull) 
 }
 // Quote: no stock or accounting effect until converted to an invoice
 model Quote {

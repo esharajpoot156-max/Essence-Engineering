@@ -14,6 +14,7 @@ import sales from './sales.js'
 import purchase from './purchase.js'
 import assets from './assets.js'
 import accounting from './accounting.js'
+import reports from './reports.js' 
 
 const prisma = new PrismaClient()
 const app = express()
@@ -474,18 +475,61 @@ app.get('/api/reports/aging', auth, wrap(async (req, res) => {
 
 // ---- Leads pipeline
 const STAGES = ['New', 'Contacted', 'Qualified', 'Quotation', 'Won', 'Lost']
-app.get('/api/leads', auth, wrap(async (req, res) => res.json(await prisma.lead.findMany({ orderBy: { createdAt: 'desc' } }))))
-app.post('/api/leads', auth, wrap(async (req, res) => {
-  if (!req.body.name) fail('Lead name is required')
-  const { name, phone, email, source, campaign, notes } = req.body
-  res.json(await prisma.lead.create({ data: { name, phone, email, source: source || 'Manual', campaign, notes } }))
+const LEAD_INCLUDE = { assignedTo: { select: { id: true, name: true } } } // shows who a lead is assigned to
+
+// Admin sees every lead. A sales user sees only the leads assigned to them.
+const leadScope = req => (req.user.role === 'admin' ? {} : { assignedToId: req.user.id })
+
+// Loads one lead that this person is allowed to work on (404 for someone else's lead)
+const ownLead = async req => {
+  const lead = await prisma.lead.findFirst({ where: { id: +req.params.id, ...leadScope(req) } })
+  if (!lead) fail('Lead not found', 404)
+  return lead
+}
+
+// Checks the user a lead is assigned to. Empty means "not assigned". Only admin and sales users can have leads.
+const assigneeId = async v => {
+  if (v === undefined || v === null || v === '') return null
+  const u = await prisma.user.findUnique({ where: { id: +v } })
+  if (!u || !['admin', 'sales'].includes(u.role)) fail('Choose a valid user to assign the lead to')
+  return u.id
+}
+
+app.get('/api/leads', auth, wrap(async (req, res) =>
+  res.json(await prisma.lead.findMany({ where: leadScope(req), include: LEAD_INCLUDE, orderBy: { createdAt: 'desc' } }))))
+
+// Users a lead can be assigned to (admin only; used by the "Assign to" dropdown)
+app.get('/api/leads/assignees', auth, wrap(async (req, res) => {
+  if (req.user.role !== 'admin') fail('Only admins can assign leads', 403)
+  res.json(await prisma.user.findMany({ where: { role: { in: ['admin', 'sales'] } }, select: { id: true, name: true, role: true }, orderBy: { name: 'asc' } }))
 }))
+
+app.post('/api/leads', auth, wrap(async (req, res) => {
+  const name = String(req.body.name || '').trim()
+  if (!name) fail('Lead name is required')
+  const { phone, email, source, campaign, notes } = req.body
+  // A sales user's own new lead is assigned to them (otherwise they could not see it). Admin may pick a user or leave it empty.
+  const assignedToId = req.user.role === 'admin' ? await assigneeId(req.body.assignedToId) : req.user.id
+  res.json(await prisma.lead.create({ data: { name, phone, email, source: source || 'Manual', campaign, notes, assignedToId }, include: LEAD_INCLUDE }))
+}))
+
+// Admin assigns (or un-assigns) a lead.  Body: { userId: 3 }  or  { userId: null }
+app.patch('/api/leads/:id/assign', auth, wrap(async (req, res) => {
+  if (req.user.role !== 'admin') fail('Only admins can assign leads', 403)
+  const assignedToId = await assigneeId(req.body.userId)
+  res.json(await prisma.lead.update({ where: { id: +req.params.id }, data: { assignedToId }, include: LEAD_INCLUDE }))
+}))
+
+// Move a lead to another stage (a sales user can only move their own leads)
 app.patch('/api/leads/:id', auth, wrap(async (req, res) => {
   if (!STAGES.includes(req.body.stage)) fail('Unknown stage')
-  res.json(await prisma.lead.update({ where: { id: +req.params.id }, data: { stage: req.body.stage } }))
+  const lead = await ownLead(req)
+  res.json(await prisma.lead.update({ where: { id: lead.id }, data: { stage: req.body.stage }, include: LEAD_INCLUDE }))
 }))
+
+// Turn a lead into a customer (a sales user can only convert their own leads)
 app.post('/api/leads/:id/convert', auth, wrap(async (req, res) => {
-  const lead = await prisma.lead.findUniqueOrThrow({ where: { id: +req.params.id } })
+  const lead = await ownLead(req)
   const [contact] = await prisma.$transaction([
     prisma.contact.create({ data: { type: 'customer', name: lead.name, phone: lead.phone, email: lead.email } }),
     prisma.lead.update({ where: { id: lead.id }, data: { stage: 'Won' } })])
@@ -553,4 +597,5 @@ sales(app, { prisma, wrap, fail, post, auth, N, r2, balanceOf }) // NEW
 purchase(app, { prisma, wrap, fail, post, auth, N, r2, balanceOf })
 assets(app, { prisma, wrap, fail, post, auth, N, r2 })
 accounting(app, { prisma, wrap, fail, auth, N, r2 })
+reports(app,{ prisma, wrap, fail, auth, N, r2 })
 app.listen(process.env.PORT || 4000, () => console.log('API running on', process.env.PORT || 4000))

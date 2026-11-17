@@ -111,23 +111,42 @@ export function Documents({ kind }) {
 
 const STAGES = ['New', 'Contacted', 'Qualified', 'Quotation', 'Won', 'Lost']
 export function Leads() {
-  const [rows, reload] = useLoad('/leads'), [f, setF] = useState({ name: '', phone: '', source: 'Manual' }), [err, setErr] = useState('')
+  const admin = myRole() === 'admin' // only the admin can assign leads
+  const blank = { name: '', phone: '', source: 'Manual', assignedToId: '' }
+  const [rows, reload] = useLoad('/leads'), [f, setF] = useState(blank), [err, setErr] = useState('')
+  const [people, setPeople] = useState([])   // users a lead can be assigned to (admin only)
+  const [who, setWho] = useState('all')      // admin filter: 'all', 'none' (not assigned) or a user id
+  useEffect(() => { if (admin) api('/leads/assignees').then(setPeople).catch(() => {}) }, [admin])
   const run = async fn => { try { await fn(); setErr(''); reload() } catch (e) { setErr(e.message) } }
+
+  // The leads shown on the board (the filter is only used by the admin)
+  const shown = (rows || []).filter(l => who === 'all' || (who === 'none' ? !l.assignedToId : String(l.assignedToId) === who))
   return (<>
-    <Title hint="Meta leads arrive here automatically once the webhook is connected.">Leads</Title>
-    <div className="grid sm:grid-cols-4 gap-2 mb-2">
+    <Title hint={admin ? 'Meta leads arrive here automatically. Assign each lead to a team member.' : 'These are the leads assigned to you.'}>Leads</Title>
+    <div className={'grid gap-2 mb-2 ' + (admin ? 'sm:grid-cols-5' : 'sm:grid-cols-4')}>
       <input className={inp} placeholder="Name" value={f.name} onChange={e => setF({ ...f, name: e.target.value })} />
       <input className={inp} placeholder="Phone" value={f.phone} onChange={e => setF({ ...f, phone: e.target.value })} />
       <select className={inp} value={f.source} onChange={e => setF({ ...f, source: e.target.value })}>{['Manual', 'Meta Ads', 'WhatsApp', 'Website', 'Referral'].map(s => <option key={s}>{s}</option>)}</select>
-      <Btn onClick={() => run(async () => { await api('/leads', { method: 'POST', body: f }); setF({ name: '', phone: '', source: 'Manual' }) })}>Add lead</Btn></div>
+      {admin && <select className={inp} aria-label="Assign to" value={f.assignedToId} onChange={e => setF({ ...f, assignedToId: e.target.value })}>
+        <option value="">Not assigned</option>{people.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select>}
+      <Btn onClick={() => run(async () => { await api('/leads', { method: 'POST', body: f }); setF(blank) })}>Add lead</Btn></div>
+    {admin && <label className="text-sm block mt-3">Show
+      <select className={inp + ' w-56 ml-2 inline-block'} value={who} onChange={e => setWho(e.target.value)}>
+        <option value="all">All leads</option><option value="none">Not assigned</option>
+        {people.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>}
     <Err e={err} />
     <div className="flex gap-3 overflow-x-auto mt-6 pb-4">
-      {STAGES.map(s => { const col = (rows || []).filter(l => l.stage === s); return (
+      {STAGES.map(s => { const col = shown.filter(l => l.stage === s); return (
         <section key={s} className="min-w-56 w-56 shrink-0">
           <h2 className="font-semibold text-sm border-b-2 border-gold pb-1 mb-2">{s} <span className="text-ink/50 font-normal">{col.length}</span></h2>
           <div className="space-y-2">{col.map(l => (
             <article key={l.id} className="bg-white border border-navy/10 rounded p-3 text-sm">
               <p className="font-medium">{l.name}</p><p className="text-ink/60">{l.phone || 'No phone'} · {l.source}</p>
+              {admin
+                ? <select className={inp + ' mt-2'} aria-label="Assign to" value={l.assignedToId ?? ''}
+                    onChange={e => run(() => api(`/leads/${l.id}/assign`, { method: 'PATCH', body: { userId: e.target.value || null } }))}>
+                    <option value="">Not assigned</option>{people.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
+                : null}
               <select className={inp + ' mt-2'} aria-label="Move to stage" value={l.stage} onChange={e => run(() => api('/leads/' + l.id, { method: 'PATCH', body: { stage: e.target.value } }))}>{STAGES.map(x => <option key={x}>{x}</option>)}</select>
               {l.stage !== 'Won' && <button className="text-gold font-medium mt-2" onClick={() => run(() => api(`/leads/${l.id}/convert`, { method: 'POST' }))}>Make customer</button>}
             </article>))}
@@ -136,7 +155,6 @@ export function Leads() {
     </div>
   </>)
 }
-
 export function Reports() {
   const [tb] = useLoad('/reports/trial-balance'), [pl] = useLoad('/reports/pnl'), [jr] = useLoad('/journal')
   return (<>
