@@ -7,14 +7,6 @@ import { api } from './api'
 import { Btn, BtnLight, Title, Err, Field, inp } from './ui'
 import { useCustomize, FORMS, OPTIONS, DEFAULT_LABELS } from './customize'
 
-// Modules that can be switched on or off (same list as the old settings page)
-const MODS = [
-  ['sales', 'Sales & customers'],
-  ['purchases', 'Purchases & suppliers'],
-  ['inventory', 'Inventory'],
-  ['leads', 'Leads'],
-  ['reports', 'Reports'],
-]
 
 // Tiles that work now: [page, label, icon]
 const READY = [
@@ -113,29 +105,41 @@ function BusinessPage() {
 }
 
 // ---------- Page: Modules on/off ----------
-function ModulesPage({ settings, onSaved }) {
-  const [mods, setMods] = useState(settings.modules)
+// ---------- Page: Tabs (show or hide each page of the sidebar) ----------
+// A page that is switched off is saved as "hide:/path" inside settings.modules. Everything else is shown.
+function ModulesPage({ settings, onSaved, groups }) {
+  const [hidden, setHidden] = useState(() => new Set((settings.modules || []).filter(m => m.startsWith('hide:')).map(m => m.slice(5))))
   const [msg, setMsg] = useState(''), [err, setErr] = useState('')
-  const toggle = m => setMods(mods.includes(m) ? mods.filter(x => x !== m) : [...mods, m])
-  // Saves to the backend (same call the old settings page used)
+  // Dashboard (no title) and the Admin group (Team, Settings) always stay visible
+  const tabs = groups.filter(([title]) => title && title !== 'Admin')
+  // Show (true) or hide (false) one or more pages
+  const flip = (paths, show) => { const next = new Set(hidden); paths.forEach(p => (show ? next.delete(p) : next.add(p))); setHidden(next); setMsg('') }
   const save = async () => {
-    try { await api('/settings', { method: 'PUT', body: { modules: mods } }); setMsg('Saved'); setErr(''); onSaved() }
+    try { await api('/settings', { method: 'PUT', body: { modules: [...hidden].map(p => 'hide:' + p) } }); setMsg('Saved'); setErr(''); onSaved() }
     catch (e) { setErr(e.message); setMsg('') }
   }
   return (
-    <Card className="max-w-md">
-      <p className="text-sm text-ink/60">Turn on only the modules your team uses. Hidden modules keep their data.</p>
-      {MODS.map(([k, l]) => (
-        <label key={k} className="flex items-center gap-2">
-          <input type="checkbox" checked={mods.includes(k)} onChange={() => toggle(k)} />{l}
-        </label>
+    <Card className="max-w-2xl">
+      <p className="text-sm text-ink/60">Untick the pages you do not need and they disappear from the sidebar. Their data is kept.</p>
+      {tabs.map(([title, items]) => (
+        <div key={title} className="mt-3">
+          {/* Group checkbox: shows or hides every page of the group */}
+          <label className="flex items-center gap-2 font-medium">
+            <input type="checkbox" checked={items.every(n => !hidden.has(n[0]))} onChange={e => flip(items.map(n => n[0]), e.target.checked)} />{title}
+          </label>
+          {/* One checkbox for every page of the group */}
+          {items.length > 1 && items.map(n => (
+            <label key={n[0]} className="flex items-center gap-2 ml-7 mt-1 text-sm">
+              <input type="checkbox" checked={!hidden.has(n[0])} onChange={e => flip([n[0]], e.target.checked)} />{n[1]}
+            </label>
+          ))}
+        </div>
       ))}
-      <div className="flex items-center gap-3"><Btn onClick={save}>Save modules</Btn><span className="text-sm text-ink/60">{msg}</span></div>
+      <div className="flex items-center gap-3 mt-4"><Btn onClick={save}>Save</Btn><span className="text-sm text-ink/60">{msg}</span></div>
       <Err e={err} />
     </Card>
   )
 }
-
 // ---------- Page: Form Options (optional checkboxes + defaults) ----------
 function FormsPage() {
   const { settings, setOption, setDefault, setForm } = useCustomize()
@@ -219,7 +223,7 @@ function IntegrationsPage() {
 }
 
 // ---------- The page ----------
-export default function SettingsCustomize({ settings, onSaved }) {
+export default function SettingsCustomize({ settings, onSaved, groups = [] }) {
   const [page, setPage] = useState('home') // 'home' | 'business' | 'modules' | 'forms' | 'printing' | 'integrations'
   const { reset } = useCustomize()
   const back = () => setPage('home')
@@ -230,7 +234,7 @@ export default function SettingsCustomize({ settings, onSaved }) {
     return (<>
       <Crumb page={label} onBack={back} />
       {page === 'business' && <BusinessPage />}
-      {page === 'modules' && <ModulesPage settings={settings} onSaved={onSaved} />}
+      {page === 'modules' && <ModulesPage settings={settings} onSaved={onSaved} groups={groups} />}
       {page === 'forms' && <FormsPage />}
       {page === 'printing' && <PrintingPage />}
       {page === 'integrations' && <IntegrationsPage />}

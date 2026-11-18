@@ -36,13 +36,13 @@ const LEADS = ['admin', 'sales']                 // Leads are hidden from the ac
 //   roles  = roles allowed to open it (missing = every role)
 const GROUPS = [
   [null, [['/', 'Dashboard']]],
-  ['Banking', [
-    ['/bank-accounts', 'Bank and Cash Accounts', null, BOOKS],
-    ['/receipts', 'Receipts', null, BOOKS],
-    ['/payments', 'Payments', null, BOOKS],
-    ['/transfers', 'Inter Account Transfers', null, BOOKS],
-    ['/reconciliations', 'Bank Reconciliations', null, BOOKS],
-    ['/expense-claims', 'Expense Claims', null, BOOKS]]],
+    ['Banking', [
+    ['/bank-accounts', 'Bank and Cash Accounts', 'banking', BOOKS],
+    ['/receipts', 'Receipts', 'banking', BOOKS],
+    ['/payments', 'Payments', 'banking', BOOKS],
+    ['/transfers', 'Inter Account Transfers', 'banking', BOOKS],
+    ['/reconciliations', 'Bank Reconciliations', 'banking', BOOKS],
+    ['/expense-claims', 'Expense Claims', 'banking', BOOKS]]],
   ['Sales', [
     ['/customers', 'Customers', 'sales', SALES],
     ['/sales-quotes', 'Sales Quotes', 'sales', SALES],
@@ -56,19 +56,19 @@ const GROUPS = [
     ['/purchase-orders', 'Purchase Orders', 'purchases', BUYING],
     ['/purchase-invoices', 'Purchase Invoices', 'purchases', BUYING],
     ['/goods-receipts', 'Goods Receipts', 'purchases', BUYING]]],
-  ['Inventory and Projects', [
+    ['Inventory and Projects', [
     ['/inventory', 'Inventory Items', 'inventory', BUYING],
-    ['/projects', 'Projects', null, BOOKS]]],
+    ['/projects', 'Projects', 'projects', BOOKS]]],
   ['Payroll', [
-    ['/employees', 'Employees', null, BOOKS],
-    ['/payslips', 'Payslips', null, BOOKS]]],
+    ['/employees', 'Employees', 'payroll', BOOKS],
+    ['/payslips', 'Payslips', 'payroll', BOOKS]]],
   ['Assets', [
-    ['/fixed-assets', 'Fixed Assets', null, BOOKS],
-    ['/depreciation', 'Depreciation Entries', null, BOOKS]]],
+    ['/fixed-assets', 'Fixed Assets', 'assets', BOOKS],
+    ['/depreciation', 'Depreciation Entries', 'assets', BOOKS]]],
   ['Accounting', [
-    ['/capital-accounts', 'Capital Accounts', null, BOOKS],
-    ['/special-accounts', 'Special Accounts', null, BOOKS],
-    ['/investments', 'Investments', null, BOOKS]]],
+    ['/capital-accounts', 'Capital Accounts', 'accounting', BOOKS],
+    ['/special-accounts', 'Special Accounts', 'accounting', BOOKS],
+    ['/investments', 'Investments', 'accounting', BOOKS]]],
   ['Leads', [['/leads', 'Leads', 'leads', LEADS]]],
   ['Reports', [
     ['/reports', 'Reports', 'reports', BOOKS],
@@ -113,12 +113,13 @@ export default function App() {
   useEffect(() => { if (authed) api('/counts').then(setCounts).catch(() => {}) }, [authed, loc.pathname])
   if (!authed) return <Login onDone={() => setAuthed(true)} />
   if (!settings) return <p className="p-8">Loading…</p>
-  const on = m => !m || settings.modules.includes(m)
+    // Pages switched off in Settings > Modules are saved as "hide:/path" (everything else is shown)
+  const hiddenTabs = settings.modules.filter(m => m.startsWith('hide:')).map(m => m.slice(5))
   const role = JSON.parse(atob(getToken().split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))).role
 
   // Items this user may see, group by group (empty groups are dropped)
   const visible = GROUPS
-    .map(([title, items]) => [title, items.filter(n => on(n[2]) && (!n[3] || n[3].includes(role)))])
+        .map(([title, items]) => [title, items.filter(n => !hiddenTabs.includes(n[0]) && (!n[3] || n[3].includes(role)))])
     .filter(([, items]) => items.length)
   // Flat list of every allowed page (used by the guard and the page title)
   const allowed = visible.flatMap(([, items]) => items)
@@ -231,8 +232,7 @@ export default function App() {
 
               {/* Admin */}
               <Route path="/team" element={guard('/team', <Team />)} />
-              <Route path="/settings" element={guard('/settings', <SettingsCustomize settings={settings} onSaved={refresh} />)} />
-
+              <Route path="/settings" element={guard('/settings', <SettingsCustomize settings={settings} onSaved={refresh} groups={GROUPS} />)} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </main>
