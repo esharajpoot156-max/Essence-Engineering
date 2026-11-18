@@ -44,7 +44,7 @@ export default function purchase(app, { prisma, wrap, fail, post, auth, N, r2, b
       itemId: orNull(l.itemId) === null ? null : +l.itemId,
       accountId: orNull(l.accountId) === null ? null : +l.accountId,
       projectId: orNull(l.projectId) === null ? null : +l.projectId,
-      description: String(l.description || '').trim().slice(0, 200),
+      description: String(l.description || '').trim().slice(0, 1000),
       qty: Number(l.qty), price: Number(l.price || 0), discount: Number(l.discount || 0),
     })).filter(l => l.itemId || l.description)
     if (!lines.length) fail('Add at least one line')
