@@ -15,12 +15,12 @@ import purchase from './purchase.js'
 import assets from './assets.js'
 import accounting from './accounting.js'
 import reports from './reports.js' 
-import meta from './meta.js'
+import managerImport from './manager/routes.js'
 
 const prisma = new PrismaClient()
 const app = express()
 app.set('trust proxy', 1) // Render sits behind a proxy; rate limit uses the real visitor IP
-app.use(cors()); app.use(express.json({ limit: '2mb', verify: (req, _res, buf) => { req.rawBody = buf } })) // allows the payslip logo
+app.use(cors()); app.use(express.json({ limit: '2mb' })) // allows the payslip logo
 
 // Small helpers
 const N = v => Number(v || 0)
@@ -537,6 +537,24 @@ app.post('/api/leads/:id/convert', auth, wrap(async (req, res) => {
   res.json(contact)
 }))
 
+// ---- Meta Lead Ads webhook
+app.get('/api/webhooks/meta', (req, res) =>
+  req.query['hub.verify_token'] === process.env.META_VERIFY_TOKEN ? res.send(req.query['hub.challenge']) : res.sendStatus(403))
+app.post('/api/webhooks/meta', wrap(async (req, res) => {
+  res.sendStatus(200)
+  for (const entry of req.body.entry || []) for (const ch of entry.changes || []) {
+    if (ch.field !== 'leadgen') continue
+    const id = String(ch.value.leadgen_id), f = {}
+    if (process.env.META_PAGE_TOKEN) {
+      const r = await fetch(`https://graph.facebook.com/v21.0/${id}?access_token=${process.env.META_PAGE_TOKEN}`).then(r => r.json())
+      for (const x of r.field_data || []) f[x.name] = x.values?.[0]
+    }
+    await prisma.lead.upsert({ where: { metaId: id }, update: {}, create: {
+      metaId: id, name: f.full_name || f.name || `Meta lead ${id.slice(-5)}`, phone: f.phone_number || f.phone, email: f.email,
+      source: 'Meta Ads', campaign: String(ch.value.ad_id || ch.value.form_id || '') } })
+  }
+}))
+
 // ---- Users and accounts
 app.get('/api/accounts', auth, wrap(async (req, res) => res.json(await prisma.account.findMany({ orderBy: { code: 'asc' } }))))
 app.get('/api/users', auth, wrap(async (req, res) =>
@@ -578,8 +596,8 @@ payroll(app, { prisma, wrap, fail, post, auth, N, r2 }) // CHANGED: post added, 
 expenses(app, { prisma, wrap, fail, post, auth, N, r2 })
 sales(app, { prisma, wrap, fail, post, auth, N, r2, balanceOf }) // NEW
 purchase(app, { prisma, wrap, fail, post, auth, N, r2, balanceOf })
+managerImport(app, { prisma, wrap, fail, auth }) // Import from Manager (admin only)
 assets(app, { prisma, wrap, fail, post, auth, N, r2 })
 accounting(app, { prisma, wrap, fail, auth, N, r2 })
 reports(app,{ prisma, wrap, fail, auth, N, r2 })
-meta(app, { prisma })
 app.listen(process.env.PORT || 4000, () => console.log('API running on', process.env.PORT || 4000))

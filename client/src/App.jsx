@@ -23,6 +23,7 @@ import Payslips from './Payslips'
 import { FixedAssets, DepreciationEntries } from './FixedAssets'
 import { CapitalAccounts, SpecialAccounts, Investments } from './SimpleAccounts'
 import { ProfitAndLoss, CashFlow } from './FinancialReports'
+import ImportManager from './importManage'
 
 // Roles: admin (everything), accountant (accounts modules, no leads), sales (leads, customers, sales documents)
 const BOOKS = ['admin', 'accountant']            // banking, payroll, assets, accounting, reports
@@ -80,6 +81,7 @@ const GROUPS = [
     ['/journal', 'Journal', 'reports', BOOKS]]],
 
   ['Admin', [
+    ['/import', 'Import from Manager', null, ['admin']],
     ['/team', 'Team', null, ['admin']],
     ['/settings', 'Settings', null, ['admin']]]],
 ]
@@ -231,6 +233,7 @@ export default function App() {
               <Route path="/quotes" element={guard('/quotes', <Quotes />)} />
 
               {/* Admin */}
+              <Route path="/import" element={guard('/import', <ImportManager />)} />
               <Route path="/team" element={guard('/team', <Team />)} />
               <Route path="/settings" element={guard('/settings', <SettingsCustomize settings={settings} onSaved={refresh} groups={GROUPS} />)} />
               <Route path="*" element={<Navigate to="/" replace />} />

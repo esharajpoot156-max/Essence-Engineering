@@ -15,7 +15,13 @@ const T = {
   quote: 'ba89de75-cb87-4bde-b20f-314f01b31037',
   invoice: 'ad12b60b-23bf-4421-94df-8be79cef533e',
   terms: 'd95df676-e2cb-4be6-a9b3-86dcd79ac3bc',
+  bank: '1408c33b-6284-4f50-9e31-48cbea21f3cf',
+  receipt: '7662b887-c8d8-486e-98fd-f9dbcd41c6dc',
+  payment: '79f99d26-e43a-4ecb-a9c9-0774601a9b2e',
+  purchase: '58b9eb90-f6b8-4abc-8ea1-12fd77b8336e',
 }
+// Built-in accounts that Manager does not store in the file (the same in every file)
+export const SYSTEM = { receivable: 'd1489e95-bb28-4f5d-b42e-67d3291b3893', payable: 'dac7ba37-0ccd-45e5-906e-548e6c50df37' }
 
 // ---------- Protocol Buffers: minimal reader (no schema needed) ----------
 // Returns a list of { f: field number, w: wire type, v: value }. Varints become numbers, everything else a Buffer.
@@ -130,6 +136,27 @@ export async function readManager(buffer) {
     return { key: r.key, date, reference: text(r.fs, 2), customerKey: guidOf(r.fs, 3), address: text(r.fs, 4), description: text(r.fs, 9), validDays: validDays ?? null, expiryDate: expiry, accepted: invoiced.has(r.key), terms: terms.get(guidOf(r.fs, 34))?.text || '', lines, ...totals(lines) }
   })
 
+  // Purchase invoices: 1 date, 2 reference, 3 supplier, 9 description, 23 lines (1 item, 17 description, 18 quantity, 19 price). Manager has no tax on these in this file.
+  const purchases = ofType(T.purchase).map(r => {
+    const lines = readLines(r, 23, { item: 1, desc: 17, qty: 18, price: 19, tax: 0 })
+    return { key: r.key, date: dateOf(r.fs, 1), reference: text(r.fs, 2), supplierKey: guidOf(r.fs, 3), description: text(r.fs, 9), lines, ...totals(lines) }
+  })
+  // Bank and cash accounts: 1 name
+  const banks = ofType(T.bank).map(r => ({ key: r.key, name: text(r.fs, 1) }))
+  // Receipts: 1 date, 2 reference, 3 payer type (1 customer, 2 other), 4 customer, 5 other payer, 7 received in (bank, may be empty), 10 description, 11 lines
+  // Payments: 1 date, 2 reference, 5 payee (supplier), 7 paid from (bank, may be empty), 10 description, 11 lines
+  // Line: 2 account, 3 customer, 4 invoice it pays, 18 amount
+  const moneyLines = r => all(r.fs, 11).map(v => { const l = parse(v); return { itemKey: guidOf(l, 1), accountKey: guidOf(l, 2), customerKey: guidOf(l, 3), invoiceKey: guidOf(l, 4), description: text(l, 15), amount: numberOf(first(l, 18)) } })
+  const receipts = ofType(T.receipt).map(r => ({ key: r.key, date: dateOf(r.fs, 1), reference: text(r.fs, 2), payerKey: guidOf(r.fs, 4) || guidOf(r.fs, 5), bankKey: guidOf(r.fs, 7), description: text(r.fs, 10), lines: moneyLines(r) }))
+  const payments = ofType(T.payment).map(r => ({ key: r.key, date: dateOf(r.fs, 1), reference: text(r.fs, 2), payerKey: guidOf(r.fs, 5), bankKey: guidOf(r.fs, 7), description: text(r.fs, 10), lines: moneyLines(r) }))
+  // What Manager itself says each customer / supplier owes: invoices minus receipts on Accounts Receivable (customers); payments on Accounts Payable (suppliers)
+  const balances = new Map()
+  const bump = (k, n) => k && balances.set(k, r2((balances.get(k) || 0) + n))
+  for (const i of invoices) bump(i.customerKey, i.total)
+  for (const p of purchases) bump(p.supplierKey, p.total)   // suppliers: what we owe = purchase invoices minus payments
+  for (const x of receipts) for (const l of x.lines) if (l.accountKey === SYSTEM.receivable) bump(l.customerKey || x.payerKey, -l.amount)
+  for (const x of payments) for (const l of x.lines) if (l.accountKey === SYSTEM.payable) bump(x.payerKey, -l.amount)
+
   // ---- Checks that tell the user what may need attention ----
   const known = new Set([...customers, ...suppliers, ...items].map(x => x.key))
   const missingCust = [...quotes, ...invoices].filter(d => !d.customerKey || !byKey.has(d.customerKey)).length
@@ -141,5 +168,5 @@ export async function readManager(buffer) {
   const badItem = [...quotes, ...invoices].flatMap(d => d.lines).filter(l => l.itemKey && !known.has(l.itemKey)).length
   if (badItem) warnings.push(`${badItem} lines point to an item that is not in the file`)
 
-  return { customers, suppliers, items, taxes: [...taxes.values()], quotes, invoices, warnings }
+  return { customers, suppliers, items, taxes: [...taxes.values()], quotes, invoices, banks, receipts, payments, purchases, balances, warnings }
 }
