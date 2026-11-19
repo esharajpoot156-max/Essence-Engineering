@@ -8,6 +8,7 @@
 //   POST   /contacts       -> create (body includes type)
 //   PUT    /contacts/:id   -> update
 //   DELETE /contacts/:id   -> delete
+// The list has a Status button: each click moves to the next filter (All > Overdue > Unpaid > Paid > Overpaid > All).
 import { useState } from 'react'
 import { api } from './api'
 import { useLoad, money, Btn, BtnLight, Badge, Title, Err, Field, Table, inp } from './ui'
@@ -30,12 +31,25 @@ const KINDS = {
 // Empty form values
 const BLANK = { name: '', code: '', phone: '', email: '', creditLimit: '', billingAddress: '', deliveryAddress: '', dueDays: '' }
 
-// Paid / Unpaid / Overdue badge worked out from the balance and the overdue amount
+// Which payment group a contact belongs to, worked out from the balance and the overdue amount
+const statusKey = r => {
+  if (Number(r.balance) < -0.005) return 'overpaid'
+  if (Number(r.overdue) > 0) return 'overdue'
+  if (Number(r.balance) > 0) return 'unpaid'
+  return 'paid'
+}
+
+// Status filter steps: each click on the Status button moves to the next one, then back to All
+const STATUS_STEPS = [['all', 'All'], ['overdue', 'Overdue'], ['unpaid', 'Unpaid'], ['paid', 'Paid'], ['overpaid', 'Overpaid']]
+
+// Paid / Unpaid / Overdue / Overpaid badge
 const statusOf = r => {
-  if (Number(r.balance) < -0.005) return <Badge tone="gold">Overpaid</Badge>
-  if (Number(r.overdue) > 0) return <Badge tone="red">Overdue</Badge>
-  if (Number(r.balance) > 0) return <Badge tone="gold">Unpaid</Badge>
-  return <Badge tone="green">Paid</Badge>
+  switch (statusKey(r)) {
+    case 'overpaid': return <Badge tone="gold">Overpaid</Badge>
+    case 'overdue': return <Badge tone="red">Overdue</Badge>
+    case 'unpaid': return <Badge tone="gold">Unpaid</Badge>
+    default: return <Badge tone="green">Paid</Badge>
+  }
 }
 
 function ContactsPage({ type }) {
@@ -47,6 +61,7 @@ function ContactsPage({ type }) {
   const [f, setF] = useState(BLANK)
   const [editing, setEditing] = useState(null)
   const [search, setSearch] = useState('')
+  const [statusF, setStatusF] = useState('all') // status filter on the list
   const [err, setErr] = useState('')
 
   // Optional fields: shown only when ticked (like Manager.io)
@@ -140,13 +155,22 @@ function ContactsPage({ type }) {
   </>)
 
   // ---------- List view ----------
-  // Search matches name, code, phone and email
+  // Search matches name, code, phone and email; the Status button narrows it further
   const q = search.toLowerCase()
-  const shown = rows && rows.filter(r => [r.name, r.code, r.phone, r.email].join(' ').toLowerCase().includes(q))
+  const stepNow = STATUS_STEPS.find(x => x[0] === statusF) || STATUS_STEPS[0]
+  const nextStatus = () => setStatusF(STATUS_STEPS[(STATUS_STEPS.indexOf(stepNow) + 1) % STATUS_STEPS.length][0])
+  const shown = rows && rows
+    .filter(r => statusF === 'all' || statusKey(r) === statusF)
+    .filter(r => [r.name, r.code, r.phone, r.email].join(' ').toLowerCase().includes(q))
 
   return (<>
     <Title hint={k.hint} right={<Btn onClick={openNew}>New {k.one}</Btn>}>{k.title}</Title>
-    <input className={inp + ' max-w-xs mb-4'} placeholder="Search" aria-label="Search" value={search} onChange={e => setSearch(e.target.value)} />
+    <div className="flex flex-wrap items-center gap-3 mb-4">
+      <input className={inp + ' max-w-xs'} placeholder="Search" aria-label="Search" value={search} onChange={e => setSearch(e.target.value)} />
+      <button className="border border-navy/20 rounded px-3 py-2 text-sm bg-white hover:bg-mist/60" title="Click to change the status filter" onClick={nextStatus}>
+        Status: <b className={statusF === 'all' ? '' : 'text-gold'}>{stepNow[1]}</b>
+      </button>
+    </div>
     <Err e={err} />
     <div className="mt-2" />
     <Table

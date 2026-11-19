@@ -132,20 +132,33 @@ app.put('/api/settings', auth, wrap(async (req, res) => {
 // ---- Contacts (customers / suppliers) with running balance
 // Cancelled documents are left out of the balance (status: 'active' only)
 // Also returns the new fields, document counts and "overdue" for the Customers / Suppliers pages
+// status: 'overdue' (an invoice is past its due date), 'owes' (balance but not overdue) or 'clear'
 app.get('/api/contacts', auth, wrap(async (req, res) => {
   const type = req.query.type
   if (!CONTACT_TYPES.includes(type)) fail('type must be customer or supplier')
   if (!canContact(req.user.role, type)) fail('Your role cannot do this', 403)
   const rows = await prisma.contact.findMany({ where: { type }, include: {
-    invoices: { where: { status: 'active' }, select: { total: true } },
+    invoices: { where: { status: 'active' }, select: { total: true, dueDate: true }, orderBy: [{ date: 'asc' }, { id: 'asc' }] },
     payments: { select: { amount: true, kind: true } },
     creditNotes: { select: { total: true } },
     _count: { select: { quotes: true } } }, orderBy: { name: 'asc' } })
-  res.json(rows.map(({ invoices, payments, creditNotes, _count, ...c }) => ({ ...c,
-    balance: invoices.reduce((s, i) => s + N(i.total), 0) - payments.reduce((s, p) => s + N(p.amount), 0) - creditNotes.reduce((s, n) => s + N(n.total), 0),
-    overdue: 0, // will use invoice due dates once the new purchase invoices are built
-    counts: { quotes: _count.quotes, orders: 0, invoices: invoices.length,
-      receipts: payments.filter(p => p.kind === 'receipt').length, payments: payments.filter(p => p.kind === 'payment').length } })))
+  const today = new Date(); today.setUTCHours(0, 0, 0, 0)
+  res.json(rows.map(({ invoices, payments, creditNotes, _count, ...c }) => {
+    const paid = payments.reduce((s, p) => s + N(p.amount), 0) + creditNotes.reduce((s, n) => s + N(n.total), 0)
+    const balance = r2(invoices.reduce((s, i) => s + N(i.total), 0) - paid)
+    // Payments and credit notes are applied to the oldest invoices first; what is left past its due date is overdue
+    let credit = paid, overdue = 0
+    for (const i of invoices) {
+      const used = Math.min(credit, N(i.total)); credit -= used
+      const left = r2(N(i.total) - used)
+      if (left > 0.005 && i.dueDate && new Date(i.dueDate) < today) overdue += left
+    }
+    overdue = r2(overdue)
+    return { ...c, balance, overdue,
+      status: overdue > 0.005 ? 'overdue' : balance > 0.005 ? 'owes' : 'clear',
+      counts: { quotes: _count.quotes, orders: 0, invoices: invoices.length,
+        receipts: payments.filter(p => p.kind === 'receipt').length, payments: payments.filter(p => p.kind === 'payment').length } }
+  }))
 }))
 // Saves the new fields too
 app.post('/api/contacts', auth, wrap(async (req, res) => {
