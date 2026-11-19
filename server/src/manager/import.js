@@ -13,14 +13,25 @@ export const r2 = n => Math.round((n + Number.EPSILON) * 100) / 100
 const clean = v => { const s = String(v ?? '').trim(); return s || null }
 const PLACEHOLDER = 'Unknown customer'
 
-// Our software only stores whole-number quantities and prices with 2 decimals. A line like 2.5 x 100 becomes 1 x 250,
-// so the amount stays exactly the same as in Manager. The original is written in the description.
+// Our software stores whole-number quantities, prices with 2 decimals, and a line discount as a PERCENT (Manager uses an AMOUNT).
+// A line is saved as it is when that is exact: a whole quantity, a 2-decimal price and (if there is a discount) an exact 2-decimal percent.
+// Otherwise it becomes 1 x the net amount, so the total stays exactly the same as in Manager. The original is written in the description.
 export function fitLine(l) {
+  const disc = l.discount || 0, gross = l.qty * l.price
   const cents = Math.abs(l.price * 100 - Math.round(l.price * 100)) < 1e-6      // our prices keep 2 decimals only
-  if (Number.isInteger(l.qty) && l.qty >= 1 && cents) return { qty: l.qty, price: l.price, description: l.description, changed: false }
-  const note = ` (qty ${l.qty} x ${l.price})`
-  return { qty: 1, price: r2(l.qty * l.price), description: (l.description || '') + note, changed: true }
+  if (Number.isInteger(l.qty) && l.qty >= 1 && cents) {
+    if (!disc) return { qty: l.qty, price: l.price, discount: 0, description: l.description, changed: false }
+    const pct = gross > 0 ? Math.round(disc / gross * 10000) / 100 : NaN
+    if (pct > 0 && pct <= 100 && Math.abs(r2(gross * (1 - pct / 100)) - r2(gross - disc)) < 0.005)
+      return { qty: l.qty, price: l.price, discount: pct, description: l.description, changed: false }
+  }
+  const net = r2(gross - disc)
+  // a discount on a line with no price (e.g. "Discount if any") is simply a negative amount
+  const note = gross === 0 ? '' : disc ? ` (qty ${l.qty} x ${l.price}, discount ${disc})` : ` (qty ${l.qty} x ${l.price})`
+  return { qty: 1, price: net, discount: 0, description: (l.description || '') + note, changed: true }
 }
+// The amount of one saved line (the same formula as the app: qty x price x (1 - discount %))
+export const lineAmount = l => r2(l.qty * l.price * (1 - (l.discount || 0) / 100))
 
 // Quote number: QUO-0514 for Manager reference 514, so the numbers match what the client is used to
 function quoteNumber(ref, taken, n) {
@@ -82,7 +93,7 @@ export async function runBasics(tx, data, dryRun) {
 
     // ---- Quotes, oldest first so that QUO numbers keep counting upwards ----
     const have = new Set((await tx.salesDoc.findMany({ where: { kind: 'quote' }, select: { number: true } })).map(d => d.number))
-    const taken = new Set()   // numbers used inside this file (a repeated reference gets -2); numbers already saved are in `have`
+    const taken = new Set(have)
     const sorted = [...data.quotes].sort((a, b) => (a.date || '').localeCompare(b.date || '') || (+a.reference || 0) - (+b.reference || 0))
     let n = 0
     for (const q of sorted) {
@@ -94,9 +105,9 @@ export async function runBasics(tx, data, dryRun) {
 
       const lines = q.lines.map(l => {
         const f = fitLine(l); if (f.changed) rep.splitQuantityLines++
-        return { itemId: l.itemKey ? itemByKey.get(l.itemKey) ?? null : null, description: f.description || '', qty: f.qty, price: f.price, discount: 0 }
+        return { itemId: l.itemKey ? itemByKey.get(l.itemKey) ?? null : null, description: f.description || '', qty: f.qty, price: f.price, discount: f.discount }
       })
-      const subtotal = r2(lines.reduce((s, l) => s + l.qty * l.price, 0))
+      const subtotal = r2(lines.reduce((s, l) => s + lineAmount(l), 0))
       if (Math.abs(subtotal - q.subtotal) > 0.005) rep.totalMismatches.push(`${number}: ours ${subtotal}, Manager ${q.subtotal}`)
       // Keep Manager's tax and total exactly. Any tiny difference goes to "rounding".
       const taxRate = q.taxRate || (subtotal ? r2(q.tax / subtotal * 100) : 0)

@@ -107,30 +107,31 @@ export async function readManager(buffer) {
   const terms = new Map(ofType(T.terms).map(r => [r.key, { title: text(r.fs, 1), text: text(r.fs, 2) }]))
 
   // Document lines. Each line: item (optional), description, quantity, price, tax code (optional)
-  const readLines = (r, fLine, F) => all(r.fs, fLine).map(v => {
+  const readLines = (r, fLine, F, useDisc = false) => all(r.fs, fLine).map(v => {
     const l = parse(v), taxKey = guidOf(l, F.tax)
-    return { itemKey: guidOf(l, F.item), description: text(l, F.desc), qty: numberOf(first(l, F.qty)), price: numberOf(first(l, F.price)), taxRate: taxKey ? (taxes.get(taxKey)?.rate ?? 0) : 0 }
+    return { itemKey: guidOf(l, F.item), description: text(l, F.desc), qty: numberOf(first(l, F.qty)), price: numberOf(first(l, F.price)), discount: useDisc ? numberOf(first(l, F.disc)) : 0, taxRate: taxKey ? (taxes.get(taxKey)?.rate ?? 0) : 0 }
   })
   // Totals: subtotal, tax (per line) and the single tax rate when every taxed line uses the same rate
-  const totals = lines => {
-    const subtotal = r2(lines.reduce((s, l) => s + l.qty * l.price, 0))
-    const tax = r2(lines.reduce((s, l) => s + l.qty * l.price * l.taxRate / 100, 0))
+  const totals = (lines, wholeRupee = false) => {
+    const net = l => l.qty * l.price - (l.discount || 0)   // Manager's line discount is an AMOUNT in rupees (only counted when the document's discount switch is on); tax is charged on the amount after discount
+    const subtotal = r2(lines.reduce((s, l) => s + net(l), 0))
+    const tax = r2(lines.reduce((s, l) => s + net(l) * l.taxRate / 100, 0))
     const rates = [...new Set(lines.filter(l => l.taxRate).map(l => l.taxRate))]
-    const mixed = rates.length > 1 || (rates.length === 1 && lines.some(l => !l.taxRate && l.qty * l.price !== 0))
-    return { subtotal, tax, total: r2(subtotal + tax), taxRate: rates.length === 1 ? rates[0] : 0, mixedTax: mixed }
+    const mixed = rates.length > 1 || (rates.length === 1 && lines.some(l => !l.taxRate && net(l) !== 0))
+    return { subtotal, tax, total: wholeRupee ? Math.round(subtotal + tax) : r2(subtotal + tax), taxRate: rates.length === 1 ? rates[0] : 0, mixedTax: mixed }
   }
 
-  // Sales invoices: 1 date, 2 reference, 3 customer, 4 address, 12 description, 49 lines, 51 quote it came from
+  // Sales invoices: 1 date, 2 reference, 3 customer, 4 address, 12 description, 49 lines (24 = line discount amount), 51 quote it came from
   const invoices = ofType(T.invoice).map(r => {
-    const lines = readLines(r, 49, { item: 1, desc: 17, qty: 18, price: 19, tax: 21 })
-    return { key: r.key, date: dateOf(r.fs, 1), reference: text(r.fs, 2), customerKey: guidOf(r.fs, 3), address: text(r.fs, 4), description: text(r.fs, 12), quoteKey: guidOf(r.fs, 51), lines, ...totals(lines) }
+    const lines = readLines(r, 49, { item: 1, desc: 17, qty: 18, price: 19, disc: 24, tax: 21 }, first(r.fs, 31) === 1)
+    return { key: r.key, date: dateOf(r.fs, 1), reference: text(r.fs, 2), customerKey: guidOf(r.fs, 3), address: text(r.fs, 4), description: text(r.fs, 12), quoteKey: guidOf(r.fs, 51), lines, ...totals(lines, first(r.fs, 29) === 1) }
   })
   // A quote is "accepted" when an invoice was made from it
   const invoiced = new Set(invoices.map(i => i.quoteKey).filter(Boolean))
 
-  // Sales quotes: 1 date, 2 reference, 3 customer, 4 address, 9 description, 24 lines, 26 valid days, 34 terms
+  // Sales quotes: 1 date, 2 reference, 3 customer, 4 address, 9 description, 24 lines (6 = line discount amount), 26 valid days, 34 terms
   const quotes = ofType(T.quote).map(r => {
-    const lines = readLines(r, 24, { item: 1, desc: 2, qty: 3, price: 4, tax: 7 })
+    const lines = readLines(r, 24, { item: 1, desc: 2, qty: 3, price: 4, disc: 6, tax: 7 }, first(r.fs, 17) === 1)
     const date = dateOf(r.fs, 1), validDays = first(r.fs, 26)
     const expiry = validDays !== undefined && date ? new Date(Date.parse(date) + validDays * 86400000).toISOString().slice(0, 10) : null
     return { key: r.key, date, reference: text(r.fs, 2), customerKey: guidOf(r.fs, 3), address: text(r.fs, 4), description: text(r.fs, 9), validDays: validDays ?? null, expiryDate: expiry, accepted: invoiced.has(r.key), terms: terms.get(guidOf(r.fs, 34))?.text || '', lines, ...totals(lines) }

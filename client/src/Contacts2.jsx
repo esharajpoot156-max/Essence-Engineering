@@ -32,6 +32,7 @@ const BLANK = { name: '', code: '', phone: '', email: '', creditLimit: '', billi
 
 // Paid / Unpaid / Overdue badge worked out from the balance and the overdue amount
 const statusOf = r => {
+  if (Number(r.balance) < -0.005) return <Badge tone="gold">Overpaid</Badge>
   if (Number(r.overdue) > 0) return <Badge tone="red">Overdue</Badge>
   if (Number(r.balance) > 0) return <Badge tone="gold">Unpaid</Badge>
   return <Badge tone="green">Paid</Badge>
@@ -150,7 +151,7 @@ function ContactsPage({ type }) {
     <div className="mt-2" />
     <Table
       cols={[
-        ['Name', r => <>{r.name}{r.code && <span className="ml-2 text-xs text-ink/50">{r.code}</span>}</>],
+        ['Name', r => r.name],
         ['Phone', r => r.phone],
         // One column per document count (shows 0 when the server sends nothing)
         ...k.counts.map(([label, key]) => [label, r => r.counts?.[key] ?? 0, 1]),

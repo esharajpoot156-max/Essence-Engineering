@@ -157,7 +157,10 @@ export default function sales(app, { prisma, wrap, fail, post, auth, N, r2, bala
   // =====================================================
   const IINCLUDE = { contact: true, lines: { orderBy: { id: 'asc' } } }
 
-  // Amount still due on each invoice. Payments and credit notes are applied to the oldest invoices first.
+    // Amount still due on each invoice.
+  // Step 1: a receipt line that names an invoice (set by the Manager import) pays THAT invoice, even if the
+  //         receipt was made out to another customer. The amount is then not free money for the payer.
+  // Step 2: all other payments and credit notes are applied to the oldest invoices first.
   async function dueMap(contactIds) {
     const ids = [...new Set(contactIds)]
     const [invs, pays, notes] = await Promise.all([
@@ -165,13 +168,30 @@ export default function sales(app, { prisma, wrap, fail, post, auth, N, r2, bala
         orderBy: [{ date: 'asc' }, { id: 'asc' }] }),
       prisma.payment.groupBy({ by: ['contactId'], where: { contactId: { in: ids } }, _sum: { amount: true } }),
       prisma.creditNote.groupBy({ by: ['contactId'], where: { contactId: { in: ids } }, _sum: { total: true } })])
-    const avail = {}
+    // Receipt lines that name an invoice: those on these invoices (any payer) and those paid by these customers (any invoice)
+    const direct = await prisma.paymentLine.findMany({
+      where: { invoiceId: { not: null }, payment: { kind: 'receipt' },
+        OR: [{ invoiceId: { in: invs.map(i => i.id) } }, { payment: { contactId: { in: ids } } }] },
+      select: { invoiceId: true, amount: true, payment: { select: { contactId: true } } } })
+    const avail = {}, paid = {}
     for (const id of ids) avail[id] = N(pays.find(p => p.contactId === id)?._sum.amount) + N(notes.find(n => n.contactId === id)?._sum.total)
+    // Step 1: direct payments. Each one is taken off its payer's free money and put on its invoice.
+    for (const l of direct) {
+      if (l.payment.contactId in avail) avail[l.payment.contactId] -= N(l.amount)
+      paid[l.invoiceId] = (paid[l.invoiceId] || 0) + N(l.amount)
+    }
+    // An invoice cannot be paid more than its total: the extra goes back to that customer's free money
+    for (const i of invs) {
+      const p = paid[i.id] || 0
+      if (p > N(i.total)) { avail[i.contactId] += r2(p - N(i.total)); paid[i.id] = N(i.total) }
+    }
+    // Step 2: what is left goes to the oldest unpaid invoices
     const due = {}
     for (const i of invs) {
-      const used = Math.min(Math.max(avail[i.contactId], 0), N(i.total))
+      const room = N(i.total) - (paid[i.id] || 0)
+      const used = Math.min(Math.max(avail[i.contactId], 0), room)
       avail[i.contactId] -= used
-      due[i.id] = r2(N(i.total) - used)
+      due[i.id] = r2(room - used)
     }
     return due
   }
