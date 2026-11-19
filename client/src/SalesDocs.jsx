@@ -3,12 +3,15 @@
 // One shared page component (DocPage) driven by a small config object per document type.
 // Flow: Quote > Order > Delivery Note > Invoice. The view page has a button that opens the
 // next document pre-filled from the current one.
-// Expected API (to be built later), where PATH is /sales-quotes, /sales-orders, /delivery-notes or /sales-invoices:
+// Expected API, where PATH is /sales-quotes, /sales-orders, /delivery-notes or /sales-invoices:
 //   GET/POST/PUT/DELETE PATH
 //   record: { id, number, date, reference, contactId, contact: {name}, address, description, taxRate,
-//             subtotal, tax, rounding, total, fixedTotal, status, expiryDate, dueDate, balanceDue,
+//             subtotal, tax, rounding, total, fixedTotal, status, expiryDate, dueDate, balanceDue, paymentStatus,
 //             lines: [{ itemId, accountId, projectId, description, qty, price, discount }] }
+//   status = 'expired' for a quote that is not accepted and is past its expiryDate (set by the backend)
+//   paymentStatus = 'paid' | 'unpaid' | 'overdue' for sales invoices (set by the backend)
 // Also reads: /contacts?type=customer, /items, /accounts, /projects
+// The list shows a totals strip (total, outstanding, overdue, expired) for the rows currently shown.
 import { useEffect, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { api } from './api'
@@ -22,6 +25,16 @@ const r2 = n => Math.round((Number(n) + Number.EPSILON) * 100) / 100
 const lineNet = l => (Number(l.qty) || 0) * (Number(l.price) || 0) * (1 - (Number(l.discount) || 0) / 100)
 // Adds days to a YYYY-MM-DD date (used for expiry and due dates)
 const addDays = (date, n) => { const d = new Date(date); d.setUTCDate(d.getUTCDate() + (Number(n) || 0)); return d.toISOString().slice(0, 10) }
+// Adds up a number taken from each row
+const sum = (list, f) => list.reduce((s, r) => s + (Number(f(r)) || 0), 0)
+
+// One small box in the totals strip above the list
+const Stat = ({ label, value, tone }) => (
+  <div className="bg-white border border-navy/10 rounded p-3">
+    <p className="text-xs text-ink/60">{label}</p>
+    <p className={'text-lg font-semibold ' + (tone === 'red' ? 'text-red-700' : 'text-navy')}>{value}</p>
+  </div>
+)
 
 // ---------- One config per document type ----------
 // priced = shows prices and totals; expiry = "Valid for ... days"; due = "Net days";
@@ -55,6 +68,12 @@ const SALES = {
     dateLabel: 'Issue date', addressLabel: 'Billing address', addressKey: 'billingAddress',
     priced: true, tax: true, due: true, account: true, project: true, status: true,
   },
+}
+
+// Status filter: each click on the Status button moves to the next step, then back to All
+const STATUS_STEPS = {
+  quote: [['all', 'All'], ['active', 'Active'], ['expired', 'Expired'], ['accepted', 'Accepted']],
+  invoice: [['all', 'All'], ['unpaid', 'Unpaid'], ['overdue', 'Overdue'], ['paid', 'Paid']],
 }
 
 // Column titles in the line editor
@@ -125,6 +144,7 @@ export function DocPage({ cfg }) {
   const [current, setCurrent] = useState(null)
   const [search, setSearch] = useState('')
   const [err, setErr] = useState('')
+  const [statusF, setStatusF] = useState('all') // status filter on the list
 
   // Arrived from the previous document in the flow: open the form pre-filled from it
   useEffect(() => {
@@ -196,15 +216,19 @@ export function DocPage({ cfg }) {
   }
 
   // Status badge for the list and view page
+  // Invoices: paid / overdue / due today / unpaid (the backend sends paymentStatus).
+  // Quotes: accepted (green), expired (red), otherwise the saved status (gold).
   const statusOf = r => {
     if (cfg.due && r.balanceDue != null) {
-      if (Number(r.balanceDue) <= 0) return <Badge tone="green">Paid in full</Badge>
+      if (r.paymentStatus === 'paid' || Number(r.balanceDue) <= 0) return <Badge tone="green">Paid in full</Badge>
+      if (r.paymentStatus === 'overdue') return <Badge tone="red">Overdue</Badge>
       const due = String(r.dueDate || '').slice(0, 10)
-      if (due && due < today()) return <Badge tone="red">Overdue</Badge>
       if (due === today()) return <Badge tone="gold">Due today</Badge>
       return <Badge>Unpaid</Badge>
     }
-    return r.status ? <Badge tone={r.status === 'accepted' || r.status === 'Accepted' ? 'green' : 'gold'}>{r.status}</Badge> : null
+    if (!r.status) return null
+    const tone = r.status === 'accepted' || r.status === 'Accepted' ? 'green' : r.status === 'expired' ? 'red' : 'gold'
+    return <Badge tone={tone}>{r.status}</Badge>
   }
 
   // ---------- Form view ----------
@@ -306,7 +330,25 @@ export function DocPage({ cfg }) {
 
   // ---------- List (filtered by the search box) ----------
   const q = search.toLowerCase()
-  const shown = rows && rows.filter(r => [r.number, r.reference, r.contact?.name, r.description].join(' ').toLowerCase().includes(q))
+  // Which status group a row belongs to (used by the Status filter)
+  const statusKey = r => {
+    if (cfg.due) return r.paymentStatus || (Number(r.balanceDue) <= 0 ? 'paid' : 'unpaid')
+    const s = String(r.status || '').toLowerCase()
+    return s === 'accepted' ? 'accepted' : s === 'expired' ? 'expired' : 'active'
+  }
+  const steps = cfg.status ? STATUS_STEPS[cfg.due ? 'invoice' : 'quote'] : []
+  const stepNow = steps.find(x => x[0] === statusF) || steps[0]
+  const nextStatus = () => setStatusF(steps[(steps.indexOf(stepNow) + 1) % steps.length][0])
+  const shown = rows && rows
+    .filter(r => statusF === 'all' || statusKey(r) === statusF)
+    .filter(r => [r.number, r.reference, r.contact?.name, r.description].join(' ').toLowerCase().includes(q))
+
+  // Totals of the rows currently shown (they follow the search box)
+  const list = shown || []
+  const totalAmt = sum(list, r => r.total)
+  const dueAmt = cfg.due ? sum(list, r => r.balanceDue) : 0
+  const overdueRows = cfg.due ? list.filter(r => r.paymentStatus === 'overdue') : []
+  const expiredRows = cfg.expiry ? list.filter(r => r.status === 'expired') : []
 
   // ---------- View page (one record) ----------
   if (view === 'view' && current) {
@@ -341,6 +383,7 @@ export function DocPage({ cfg }) {
         {current.reference && <p><b>Reference:</b> {current.reference}</p>}
         {current.expiryDate && <p><b>Valid until:</b> {fmtDate(current.expiryDate)}</p>}
         {current.dueDate && <p><b>Due date:</b> {fmtDate(current.dueDate)}</p>}
+        {cfg.due && current.balanceDue != null && <p><b>Balance due:</b> {money(current.balanceDue)}</p>}
         {current.description && <p>{current.description}</p>}
         <Table cols={lineCols.map(c => [c[0], l => c[1](l, l._n), c[2]])} rows={lines} empty="No lines." />
         {cfg.priced && <p className="text-right">Subtotal {money(current.subtotal)} · Tax {money(current.tax)}{Number(current.rounding) ? ` · Rounding ${money(current.rounding)}` : ''} · <b>Total {money(current.total)}</b></p>}
@@ -357,6 +400,7 @@ export function DocPage({ cfg }) {
     [cfg.who, r => r.contact?.name],
     cfg.description && ['Description', r => r.description],
     cfg.priced && ['Amount', r => money(r.total), 1],
+    cfg.due && ['Balance due', r => money(r.balanceDue), 1],
     cfg.status && ['Status', r => statusOf(r)],
     ['Actions', r => (
       <span className="inline-flex gap-3">
@@ -369,8 +413,23 @@ export function DocPage({ cfg }) {
 
   return (<>
     <Title hint={cfg.hint} right={<Btn onClick={openNew}>New {cfg.one}</Btn>}>{cfg.title}</Title>
-    <input className={inp + ' max-w-xs mb-4'} placeholder="Search" aria-label="Search" value={search} onChange={e => setSearch(e.target.value)} />
+    <div className="flex flex-wrap items-center gap-3 mb-4">
+      <input className={inp + ' max-w-xs'} placeholder="Search" aria-label="Search" value={search} onChange={e => setSearch(e.target.value)} />
+      {cfg.status && (
+        <button className="border border-navy/20 rounded px-3 py-2 text-sm bg-white hover:bg-mist/60" title="Click to change the status filter" onClick={nextStatus}>
+          Status: <b className={statusF === 'all' ? '' : 'text-gold'}>{stepNow[1]}</b>
+        </button>)}
+    </div>
     <Err e={err} />
+    {/* Totals strip: follows the search box */}
+    {cfg.priced && rows && (
+      <div className="grid gap-3 mb-4 sm:grid-cols-2 lg:grid-cols-4">
+        <Stat label={`Total (${list.length})`} value={money(totalAmt)} />
+        {cfg.due && <Stat label="Outstanding" value={money(dueAmt)} />}
+        {cfg.due && <Stat label={`Overdue (${overdueRows.length})`} value={money(sum(overdueRows, r => r.balanceDue))} tone="red" />}
+        {cfg.expiry && <Stat label={`Expired (${expiredRows.length})`} value={money(sum(expiredRows, r => r.total))} tone="red" />}
+      </div>
+    )}
     <div className="mt-2" />
     <Table cols={listCols} rows={shown} empty={`No ${cfg.title.toLowerCase()} yet. Click New ${cfg.one} to add one.`} />
   </>)

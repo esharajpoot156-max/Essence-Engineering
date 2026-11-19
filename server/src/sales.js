@@ -11,6 +11,11 @@
 //   Dr Cost of Goods Sold (5000), Cr Inventory (1200) = cost of the items sold
 // Totals are always calculated here, never taken from the page.
 // Withholding tax rate is saved for printing only. It does not change the entries.
+//
+// Expiry: a quote that is not accepted and whose expiryDate has passed is shown as status 'expired'
+// (worked out when reading, nothing extra is saved in the database).
+// Invoices get paymentStatus: 'paid' | 'unpaid' | 'overdue' (overdue = still due after the dueDate).
+// GET /api/sales-summary gives the sales totals (optional ?from=YYYY-MM-DD&to=YYYY-MM-DD).
 
 export default function sales(app, { prisma, wrap, fail, post, auth, N, r2, balanceOf }) {
   // ---------- Small helpers ----------
@@ -19,6 +24,7 @@ export default function sales(app, { prisma, wrap, fail, post, auth, N, r2, bala
   // Checks and returns a date from the request
   const day = v => { const d = new Date(v); if (!v || isNaN(d)) fail('Enter a valid date'); return d }
   const addDays = (d, n) => { const x = new Date(d); x.setUTCDate(x.getUTCDate() + (Number(n) || 0)); return x }
+  const startOfToday = () => { const d = new Date(); d.setUTCHours(0, 0, 0, 0); return d }
   const isStaff = req => ['admin', 'accountant'].includes(req.user.role)
   const PAID_MSG = 'Payments are already recorded against this customer, so this document cannot be changed'
 
@@ -96,12 +102,19 @@ export default function sales(app, { prisma, wrap, fail, post, auth, N, r2, bala
     { path: 'delivery-notes', kind: 'delivery', prefix: 'DN-', label: 'Delivery note' },
   ]
   const DINCLUDE = { contact: true, lines: { orderBy: { id: 'asc' } } }
+
+  // A quote that is not accepted and is past its expiry date is shown as 'expired'
+  const docStatus = d =>
+    d.kind === 'quote' && d.status !== 'accepted' && d.expiryDate && new Date(d.expiryDate) < startOfToday()
+      ? 'expired' : d.status
+
   const docOut = d => ({
     id: d.id, number: d.number, date: d.date, reference: d.reference || '', contactId: d.contactId,
     contact: { id: d.contact.id, name: d.contact.name }, address: d.address || '', description: d.description || '',
     taxRate: N(d.taxRate), subtotal: N(d.subtotal), tax: N(d.tax), rounding: N(d.rounding), total: N(d.total),
     fixedTotal: d.fixedTotal === null ? null : N(d.fixedTotal), withholdingRate: N(d.withholdingRate),
-    validDays: d.validDays, expiryDate: d.expiryDate, status: d.status, lines: d.lines.map(lineOut),
+    validDays: d.validDays, expiryDate: d.expiryDate, status: docStatus(d), isExpired: docStatus(d) === 'expired',
+    lines: d.lines.map(lineOut),
   })
 
   for (const c of DOCS) {
@@ -157,7 +170,7 @@ export default function sales(app, { prisma, wrap, fail, post, auth, N, r2, bala
   // =====================================================
   const IINCLUDE = { contact: true, lines: { orderBy: { id: 'asc' } } }
 
-    // Amount still due on each invoice.
+  // Amount still due on each invoice.
   // Step 1: a receipt line that names an invoice (set by the Manager import) pays THAT invoice, even if the
   //         receipt was made out to another customer. The amount is then not free money for the payer.
   // Step 2: all other payments and credit notes are applied to the oldest invoices first.
@@ -195,16 +208,26 @@ export default function sales(app, { prisma, wrap, fail, post, auth, N, r2, bala
     }
     return due
   }
-  const invOut = (i, due) => ({
-    id: i.id, number: i.number, date: i.date, reference: i.reference || '', contactId: i.contactId,
-    contact: { id: i.contact.id, name: i.contact.name }, address: i.address || '', description: i.description || '',
-    taxRate: N(i.taxRate),
-    // Invoices saved before this version have no subtotal: work it out
-    subtotal: N(i.subtotal) || r2(N(i.total) - N(i.tax) - N(i.rounding)),
-    tax: N(i.tax), rounding: N(i.rounding), total: N(i.total), fixedTotal: i.fixedTotal === null ? null : N(i.fixedTotal),
-    withholdingRate: N(i.withholdingRate), netDays: i.netDays, dueDate: i.dueDate, status: i.status,
-    balanceDue: due[i.id] ?? N(i.total), lines: i.lines.map(lineOut),
-  })
+
+  // 'paid', 'overdue' (still due after the due date) or 'unpaid'
+  const payStatus = (i, balanceDue) =>
+    balanceDue <= 0.005 ? 'paid'
+      : (i.dueDate && new Date(i.dueDate) < startOfToday() ? 'overdue' : 'unpaid')
+
+  const invOut = (i, due) => {
+    const balanceDue = due[i.id] ?? N(i.total)
+    return {
+      id: i.id, number: i.number, date: i.date, reference: i.reference || '', contactId: i.contactId,
+      contact: { id: i.contact.id, name: i.contact.name }, address: i.address || '', description: i.description || '',
+      taxRate: N(i.taxRate),
+      // Invoices saved before this version have no subtotal: work it out
+      subtotal: N(i.subtotal) || r2(N(i.total) - N(i.tax) - N(i.rounding)),
+      tax: N(i.tax), rounding: N(i.rounding), total: N(i.total), fixedTotal: i.fixedTotal === null ? null : N(i.fixedTotal),
+      withholdingRate: N(i.withholdingRate), netDays: i.netDays, dueDate: i.dueDate, status: i.status,
+      balanceDue, paymentStatus: payStatus(i, balanceDue), isOverdue: payStatus(i, balanceDue) === 'overdue',
+      lines: i.lines.map(lineOut),
+    }
+  }
   const oneInvoice = async id => {
     const inv = await prisma.invoice.findUnique({ where: { id }, include: IINCLUDE })
     return invOut(inv, await dueMap([inv.contactId]))
@@ -309,5 +332,48 @@ export default function sales(app, { prisma, wrap, fail, post, auth, N, r2, bala
       if ((await balanceOf(tx, old.contactId)) < -0.005) fail(PAID_MSG)
     }, { timeout: 20000, maxWait: 10000 })
     res.json({ ok: true })
+  }))
+
+  // =====================================================
+  // Sales totals (optional ?from=YYYY-MM-DD&to=YYYY-MM-DD)
+  // =====================================================
+  app.get('/api/sales-summary', auth, wrap(async (req, res) => {
+    const range = {}
+    if (req.query.from) range.gte = day(req.query.from)
+    if (req.query.to) range.lte = day(req.query.to)
+    const dateWhere = Object.keys(range).length ? { date: range } : {}
+    const today = startOfToday()
+
+    // Quotes / orders / delivery notes: count and total
+    const docs = await prisma.salesDoc.groupBy({ by: ['kind'], where: dateWhere, _sum: { total: true }, _count: { _all: true } })
+    const byKind = k => ({ count: docs.find(d => d.kind === k)?._count._all || 0, total: N(docs.find(d => d.kind === k)?._sum.total) })
+    const expired = await prisma.salesDoc.aggregate({
+      where: { ...dateWhere, kind: 'quote', status: { not: 'accepted' }, expiryDate: { lt: today } },
+      _sum: { total: true }, _count: { _all: true } })
+
+    // Invoices: the amount due is worked out on ALL active sale invoices (payments go to the oldest first),
+    // and only then are the invoices inside the date range counted.
+    const all = await prisma.invoice.findMany({
+      where: { kind: 'sale', status: 'active' },
+      select: { id: true, contactId: true, total: true, dueDate: true, date: true } })
+    const due = await dueMap(all.map(i => i.contactId))
+    const from = range.gte, to = range.lte
+    const invs = all.filter(i => (!from || i.date >= from) && (!to || i.date <= to))
+    let invoiced = 0, outstanding = 0, overdue = 0, overdueCount = 0
+    for (const i of invs) {
+      const d = due[i.id] ?? N(i.total)
+      invoiced += N(i.total); outstanding += d
+      if (d > 0.005 && i.dueDate && new Date(i.dueDate) < today) { overdue += d; overdueCount++ }
+    }
+
+    res.json({
+      quotes: { ...byKind('quote'), expiredCount: expired._count._all, expiredTotal: N(expired._sum.total) },
+      orders: byKind('order'),
+      deliveryNotes: byKind('delivery'),
+      invoices: {
+        count: invs.length, total: r2(invoiced), received: r2(invoiced - outstanding),
+        outstanding: r2(outstanding), overdue: r2(overdue), overdueCount,
+      },
+    })
   }))
 }
