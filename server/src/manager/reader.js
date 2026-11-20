@@ -126,7 +126,7 @@ export async function readManager(buffer) {
     // 2 = purchase price, 3 = sales price. Manager shows them only when flags 31 and 32 are set (otherwise the item has no price).
     const priced = first(r.fs, 31) === 1 && first(r.fs, 32) === 1
     const purchasePrice = priced ? numberOf(first(r.fs, 2)) : 0, salesPrice = priced ? numberOf(first(r.fs, 3)) : 0
-    return { key: r.key, code, name, description: desc, division: text(r.fs, 11), unit: text(r.fs, 13), purchasePrice, salesPrice, isService: /^service/i.test(cat) }
+    return { key: r.key, code, name, description: desc, division: '', unit: text(r.fs, 13), purchasePrice, salesPrice, isService: /^service/i.test(cat) }
   })
 
   // Terms and conditions texts

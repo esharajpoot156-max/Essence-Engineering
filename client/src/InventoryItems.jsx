@@ -41,8 +41,12 @@ const BLANK = {
 // Qty available = Qty on hand + Qty to receive - Qty to deliver
 // A negative value means more stock is promised to customers than the company holds.
 const onHand = r => Number(r.qtyOnHand ?? r.qty) || 0
-const available = r => onHand(r) + (Number(r.qtyToReceive) || 0) - (Number(r.qtyToDeliver) || 0)
+// The server already works out Qty available and Total cost the way Manager does, so the page only shows them
+const available = r => r.qtyAvailable != null ? Number(r.qtyAvailable) : onHand(r) - (Number(r.qtyToDeliver) || 0)
 const avgCost = r => Number(r.averageCost ?? r.cost) || 0
+const totalCostOf = r => r.totalCost != null ? Number(r.totalCost) : onHand(r) * avgCost(r)
+// Money with 2 decimals (Manager shows 744.80, not 745)
+const fmt2 = n => 'Rs ' + (Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 const unitOf = r => r.unitName ?? r.unit
 
 export default function InventoryItems() {
@@ -369,7 +373,7 @@ export default function InventoryItems() {
       ['Sales price', money(current.salesPrice ?? current.price)], ['Purchase price', money(current.purchasePrice ?? current.cost)],
       ['Qty to deliver', Number(current.qtyToDeliver) || 0], ['Qty to receive', Number(current.qtyToReceive) || 0],
       ['Qty on hand', onHand(current)], ['Qty available', available(current)],
-      ['Average cost', money(avgCost(current))], ['Total cost', money(onHand(current) * avgCost(current))],
+      ['Average cost', fmt2(avgCost(current))], ['Total cost', fmt2(totalCostOf(current))],
     ]
     return (<>
       <Title hint={unitOf(current)}
@@ -445,8 +449,8 @@ export default function InventoryItems() {
         ['Qty on hand', r => onHand(r), 1],
         // Negative available stock is shown in red
         ['Qty available', r => <span className={available(r) < 0 ? 'text-red-700 font-semibold' : ''}>{available(r)}</span>, 1],
-        ['Average cost', r => money(avgCost(r)), 1],
-        ['Total cost', r => money(onHand(r) * avgCost(r)), 1],
+        ['Average cost', r => fmt2(avgCost(r)), 1],
+['Total cost', r => fmt2(totalCostOf(r)), 1],
       ]}
       rows={shown}
       empty="No items yet. Click New Inventory Item to add one."

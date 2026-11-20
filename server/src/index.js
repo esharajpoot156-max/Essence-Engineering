@@ -236,7 +236,7 @@ app.delete('/api/contacts/:id', auth, wrap(async (req, res) => {
 
 // ---- Inventory items
 // The list also returns the field names the new Inventory page expects, plus Manager-style stock figures
-app.get('/api/items', auth, wrap(async (req, res) => res.json(await withStock(await prisma.item.findMany({ orderBy: { name: 'asc' } })))))
+app.get('/api/items', auth, wrap(async (req, res) => res.json(await withStock(await prisma.item.findMany({ orderBy: { id: 'asc' } })))))
 // Only the name is required now (no SKU), and the new fields are saved
 app.post('/api/items', auth, wrap(async (req, res) => {
   const data = itemData(req.body)
