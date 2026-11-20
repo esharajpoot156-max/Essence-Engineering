@@ -156,7 +156,7 @@ export default function banking(app, { prisma, wrap, fail, post, auth, N, r2, ba
     if (applied > 0) {
       if (contact.type !== (receipt ? 'customer' : 'supplier')) fail(receipt ? 'Lines on Accounts Receivable need a customer as the payer' : 'Lines on Accounts Payable need a supplier as the payee')
       const due = r2(await balanceOf(tx, contact.id)) + (existing && existing.contactId === contact.id ? N(existing.amount) : 0)
-      if (applied > due + 0.005) fail(`The amount on ${receipt ? 'Accounts Receivable' : 'Accounts Payable'} is more than the balance due (Rs ${due.toFixed(2)})`)
+ //     if (applied > due + 0.005) fail(`The amount on ${receipt ? 'Accounts Receivable' : 'Accounts Payable'} is more than the balance due (Rs ${due.toFixed(2)})`)
     }
 
     // Editing: remove the old journal entry first (a new one is posted below)

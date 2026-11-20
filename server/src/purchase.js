@@ -25,11 +25,11 @@ export default function purchase(app, { prisma, wrap, fail, post, auth, N, r2, b
   const netDaysOf = body => (orNull(body.netDays) === null ? null : Math.max(0, Math.floor(Number(body.netDays) || 0)))
 
   // Next document number, e.g. BILL-0001 (based on the newest number with this prefix)
-  async function nextNo(tx, model, prefix) {
-    const last = await tx[model].findFirst({ where: { number: { startsWith: prefix } }, orderBy: { id: 'desc' }, select: { number: true } })
-    const n = last ? parseInt(last.number.slice(prefix.length), 10) || 0 : 0
-    return prefix + String(n + 1).padStart(4, '0')
-  }
+async function nextNo(tx, model, prefix) {
+  const rows = await tx[model].findMany({ where: { number: { startsWith: prefix } }, select: { number: true } })
+  const n = Math.max(0, ...rows.map(r => parseInt(r.number.slice(prefix.length), 10) || 0))
+  return prefix + String(n + 1).padStart(4, '0')
+}
   const accId = async (tx, code) => (await tx.account.findUniqueOrThrow({ where: { code } })).id
   // Rounding differences post here. Created the first time it is needed.
   const roundingId = async tx => (await tx.account.upsert({ where: { code: '6900' }, update: {}, create: { code: '6900', name: 'Rounding', type: 'expense' } })).id
