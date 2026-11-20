@@ -138,6 +138,7 @@ model InvoiceLine {
   projectId   Int?                                   // NEW
   discount    Decimal @default(0) @db.Decimal(5, 2)  // NEW: line discount %
   invoice     Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+   stockQty    Float?  
 }
 
 // Payment: a receipt (money in) or a payment (money out).
@@ -275,11 +276,13 @@ model CreditNoteLine {
   price        Decimal    @db.Decimal(14, 2)
   creditNote   CreditNote @relation(fields: [creditNoteId], references: [id], onDelete: Cascade)
 }
-model Project {
+model Project{
   id           Int           @id @default(autoincrement())
   name         String
   code         String?
   paymentLines PaymentLine[]
+  active Boolean @default(true)
+  stockCost    Decimal       @default(0) @db.Decimal(14, 2)
 }
 
 model Employee {
@@ -392,6 +395,7 @@ model SalesDoc {
   sourceId        Int?
   contact         Contact        @relation(fields: [contactId], references: [id])
   lines           SalesDocLine[]
+  
 
   @@index([kind])
 }
@@ -405,6 +409,7 @@ model SalesDocLine {
   price       Decimal  @default(0) @db.Decimal(14, 2)
   discount    Decimal  @default(0) @db.Decimal(5, 2)
   doc         SalesDoc @relation(fields: [docId], references: [id], onDelete: Cascade)
+  stockQty    Float?  
 }
 // Fixed asset record. Posts nothing to the books by itself.
 model FixedAsset {

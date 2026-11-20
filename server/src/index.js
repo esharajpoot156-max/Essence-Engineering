@@ -96,6 +96,52 @@ async function checkItemAccounts(d) {
 const itemOut = i => ({ ...i, unitName: i.unit, purchasePrice: i.cost, salesPrice: i.price, qtyOnHand: i.qty, averageCost: i.cost,
   qtyToDeliver: 0, qtyToReceive: 0 }) // become real numbers once sales and purchase orders exist
 
+// Stock figures like Manager's Inventory Items page.
+// Invoices and bills made by hand already change item.qty, so only documents that never moved stock are counted here.
+//   to deliver = sales invoice qty - delivery note qty        to receive = purchase invoice qty - goods receipt qty
+//   on hand = item.qty + goods receipt qty - delivery note qty
+//   available = on hand - to deliver - sales order qty
+//   total cost = value of the units left in stock (newest purchases first), average cost = total cost / units left
+// Imported lines keep Manager's real quantity in stockQty (qty may have been collapsed to 1), so stockQty is used when it is set.
+async function withStock(items) {
+  const ids = items.map(i => i.id)
+  const [invLines, docLines, moves] = await Promise.all([
+    prisma.invoiceLine.findMany({ where: { itemId: { in: ids }, invoice: { status: 'active' } },
+      select: { id: true, itemId: true, qty: true, stockQty: true, price: true, discount: true, invoice: { select: { number: true, kind: true, date: true } } } }),
+    prisma.salesDocLine.findMany({ where: { itemId: { in: ids }, doc: { kind: { in: ['delivery', 'order', 'greceipt'] } } },
+      select: { itemId: true, qty: true, stockQty: true, doc: { select: { kind: true } } } }),
+    prisma.stockMove.findMany({ select: { ref: true }, distinct: ['ref'] })])
+  const moved = new Set(moves.map(m => m.ref))
+  const s = new Map(ids.map(id => [id, { sold: 0, bought: 0, layers: [], delivered: 0, ordered: 0, received: 0 }]))
+  for (const l of invLines) {
+    const t = s.get(l.itemId), qty = N(l.stockQty ?? l.qty), pending = !moved.has(l.invoice.number)
+    if (l.invoice.kind === 'sale') { if (pending) t.sold += qty }
+    else if (l.invoice.kind === 'purchase') {
+      // the amount of the line stays qty x price (the real amount); only the stock quantity uses stockQty
+      t.layers.push({ date: new Date(l.invoice.date).getTime(), id: l.id, qty, cost: N(l.qty) * N(l.price) * (1 - N(l.discount) / 100) })
+      if (pending) t.bought += qty
+    }
+  }
+  for (const l of docLines) {
+    const t = s.get(l.itemId), qty = N(l.stockQty ?? l.qty)
+    if (l.doc.kind === 'delivery') t.delivered += qty; else if (l.doc.kind === 'order') t.ordered += qty; else t.received += qty
+  }
+  return items.map(i => {
+    const t = s.get(i.id)
+    const toDeliver = t.sold - t.delivered, toReceive = t.bought - t.received
+    const onHand = i.qty + t.received - t.delivered
+    const net = onHand + toReceive - toDeliver
+    let total = 0, left = net
+    for (const p of t.layers.sort((a, b) => b.date - a.date || b.id - a.id)) {
+      if (left <= 0) break
+      const take = Math.min(p.qty, left); total += p.cost * take / p.qty; left -= take
+    }
+    return { ...itemOut(i), qtyToDeliver: toDeliver, qtyToReceive: toReceive, qtyOnHand: onHand,
+      qtyAvailable: onHand - Math.max(toDeliver, 0) - t.ordered,
+      averageCost: net > 0 && total ? r2(total / net) : 0, totalCost: net > 0 ? r2(total) : 0 }
+  })
+}
+
 // Roles: admin (everything), accountant (accounts modules, no leads), sales (leads, customers, sales documents)
 // Sales quotes, orders, delivery notes and sales invoices are open to all three roles.
 // Only admin and accountant may edit or delete a sales invoice (checked inside sales.js).
@@ -189,15 +235,15 @@ app.delete('/api/contacts/:id', auth, wrap(async (req, res) => {
 }))
 
 // ---- Inventory items
-// The list also returns the field names the new Inventory page expects
-app.get('/api/items', auth, wrap(async (req, res) => res.json((await prisma.item.findMany({ orderBy: { name: 'asc' } })).map(itemOut))))
+// The list also returns the field names the new Inventory page expects, plus Manager-style stock figures
+app.get('/api/items', auth, wrap(async (req, res) => res.json(await withStock(await prisma.item.findMany({ orderBy: { name: 'asc' } })))))
 // Only the name is required now (no SKU), and the new fields are saved
 app.post('/api/items', auth, wrap(async (req, res) => {
   const data = itemData(req.body)
   if (!data.name) fail('Item name is required')
   await checkItemAccounts(data)
   const sku = orNull(req.body.sku) === null ? null : String(req.body.sku).trim() // optional, kept for old data
-  res.json(itemOut(await prisma.item.create({ data: { ...data, sku, minQty: Math.max(0, +req.body.minQty || 0) } })))
+  res.json((await withStock([await prisma.item.create({ data: { ...data, sku, minQty: Math.max(0, +req.body.minQty || 0) } })]))[0])
 }))
 // Edit an item. Stock quantity is not edited here: it only changes through invoices, bills and credit notes.
 app.put('/api/items/:id', auth, wrap(async (req, res) => {
@@ -206,7 +252,7 @@ app.put('/api/items/:id', auth, wrap(async (req, res) => {
   const data = itemData(req.body)
   if (!data.name) fail('Item name is required')
   await checkItemAccounts(data)
-  res.json(itemOut(await prisma.item.update({ where: { id: old.id }, data })))
+  res.json((await withStock([await prisma.item.update({ where: { id: old.id }, data })]))[0])
 }))
 // Delete an item, only when it has never been used (CHANGED: sales quote / order / delivery note lines are checked too)
 app.delete('/api/items/:id', auth, wrap(async (req, res) => {

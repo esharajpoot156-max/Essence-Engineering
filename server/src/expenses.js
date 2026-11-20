@@ -1,5 +1,5 @@
 // src/expenses.js
-// Expense Claims: kharcha jo staff ne apni jeb se kiya.
+// Expense Claims
 // Registered from index.js with:  expenses(app, { prisma, wrap, fail, post, auth, N, r2 })
 // Role rules (admin and accountant only) are applied in index.js.
 // Accounting: Dr expense accounts (lines), Cr "Employee Claims Payable" (2200).

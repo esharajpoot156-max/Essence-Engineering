@@ -1,6 +1,6 @@
 // src/manager/ledger.js
-// Step 2 of the Manager import: bank accounts, old sales invoices, receipts and payments, POSTED into the accounts.
-// Run step 1 (import.js) first: customers, suppliers and items must already exist.
+// Step 2 of the Manager import: bank accounts, old sales invoices, purchase invoices, receipts, payments and expense claims, POSTED into the accounts.
+// Run step 1 (import.js) first: customers, suppliers, items, projects and employees must already exist.
 //
 //   const report = await importLedger(prisma, data, { dryRun: true })
 //
@@ -9,6 +9,8 @@
 //   Receipt : Dr bank account / Cr Accounts Receivable 1100 (or Sales for item lines, Suspense if no account)
 //   Payment : Dr Accounts Payable 2000 (or Suspense) / Cr bank account
 //   Purchase invoice : Dr General Expenses 6000 / Cr Accounts Payable 2000 (no stock, same as the sales side)
+//   Expense claim : Dr General Expenses 6000 / Cr Employee Claims Payable 2200
+// Invoice, receipt and payment lines keep their Manager project, so the Projects page matches Manager.
 // STOCK IS NOT TOUCHED and no cost of sales is posted: the old invoices are history. Set opening stock separately.
 // Everything is saved in ONE transaction. Dry run saves nothing and returns the report, including a balance check against Manager.
 
@@ -20,7 +22,7 @@ const UNDEPOSITED = 'Undeposited funds'
 const side = (accountId, signedDebit) => ({ accountId, debit: signedDebit > 0 ? r2(signedDebit) : 0, credit: signedDebit < 0 ? r2(-signedDebit) : 0 }) // negative amounts swap sides
 
 export async function runLedger(tx, data, dryRun) {
-  const rep = { created: { banks: 0, invoices: 0, bills: 0, receipts: 0, payments: 0 }, skipped: { invoices: 0, bills: 0, receipts: 0, payments: 0 },
+  const rep = { created: { banks: 0, invoices: 0, bills: 0, receipts: 0, payments: 0, expenseClaims: 0 }, skipped: { invoices: 0, bills: 0, receipts: 0, payments: 0, expenseClaims: 0 },
     undepositedReceipts: 0, undepositedPayments: 0, suspenseLines: 0, splitQuantityLines: 0, negativeAmounts: [], balanceMismatches: [], customersWithCredit: [], notes: [] }
 
   {
@@ -34,8 +36,9 @@ export async function runLedger(tx, data, dryRun) {
     const upsert = async (code, name, type) => (await tx.account.upsert({ where: { code }, update: {}, create: { code, name, type } })).id
     const suspense = await upsert('1900', 'Suspense', 'asset'), rounding = await upsert('6900', 'Rounding', 'expense')
 
-    // ---- Contacts and items created by step 1 (same order, so every Manager record finds its own) ----
-    const { idByKey: idOf, itemByKey: itemId, placeholderId: unknownId } = await assignAll(tx, data)
+    // ---- Contacts, items, projects and employees created by step 1 (same order, so every Manager record finds its own) ----
+    const { idByKey: idOf, itemByKey: itemId, projectByKey, employeeByKey: employeeOf, placeholderId: unknownId } = await assignAll(tx, data)
+    const projectOf = key => (key ? projectByKey.get(key) ?? null : null)
 
     // ---- Bank and cash accounts (created if their name does not exist yet) ----
     const banks = await tx.bankAccount.findMany()
@@ -62,7 +65,8 @@ export async function runLedger(tx, data, dryRun) {
     }
     const ours = new Map()                       // what we will owe per Manager customer/supplier key, to check against Manager
     const bump = (k, n) => k && ours.set(k, r2((ours.get(k) || 0) + n))
-    const invoiceIdByKey = new Map()
+    const invoiceIdByKey = new Map()             // Manager invoice key -> our invoice id (so a receipt line can name the invoice it pays)
+
     // ---- Sales invoices ----
     const before = new Set((await tx.invoice.findMany({ where: { kind: 'sale' }, select: { number: true } })).map(i => i.number))   // invoices already in your software
     const haveInv = new Set(before)
@@ -80,11 +84,11 @@ export async function runLedger(tx, data, dryRun) {
       haveInv.add(number)
       const contactId = idOf.get(inv.customerKey) ?? unknownId
       if (!contactId) throw new Error(`Invoice ${number} has no customer. Run step 1 first so "Unknown customer" exists.`)
-      const lines = inv.lines.map(l => { const f = fitLine(l); if (f.changed) rep.splitQuantityLines++; return { itemId: itemId.get(l.itemKey) ?? null, description: f.description || '', qty: f.qty, price: f.price, discount: f.discount } })
+      const lines = inv.lines.map(l => { const f = fitLine(l); if (f.changed) rep.splitQuantityLines++; return { itemId: itemId.get(l.itemKey) ?? null, projectId: projectOf(l.projectKey), description: f.description || '', qty: f.qty, price: f.price, discount: f.discount, stockQty: l.qty } })
       const subtotal = r2(lines.reduce((s, l) => s + lineAmount(l), 0))
       const rnd = r2(inv.total - subtotal - inv.tax)
       const taxRate = inv.taxRate || (subtotal ? r2(inv.tax / subtotal * 100) : 0)
-            if (!dryRun) {
+      if (!dryRun) {
         const saved = await tx.invoice.create({ data: { number, kind: 'sale', date: new Date(inv.date), contactId, total: inv.total, tax: inv.tax, taxRate, status: 'active',
           reference: clean(ref), address: clean(inv.address), description: clean(inv.description), subtotal, rounding: rnd,
           netDays: 0, dueDate: new Date(inv.date),            // Manager: no due date = due on the invoice date
@@ -109,7 +113,7 @@ export async function runLedger(tx, data, dryRun) {
       haveBill.add(number)
       const contactId = idOf.get(b.supplierKey)
       if (!contactId) throw new Error(`Purchase invoice ${number} has no supplier in your software`)
-      const lines = b.lines.map(l => { const f = fitLine(l); if (f.changed) rep.splitQuantityLines++; return { itemId: itemId.get(l.itemKey) ?? null, description: f.description || '', qty: f.qty, price: f.price, discount: f.discount } })
+      const lines = b.lines.map(l => { const f = fitLine(l); if (f.changed) rep.splitQuantityLines++; return { itemId: itemId.get(l.itemKey) ?? null, projectId: projectOf(l.projectKey), description: f.description || '', qty: f.qty, price: f.price, discount: f.discount, stockQty: l.qty } })
       const subtotal = r2(lines.reduce((s, l) => s + lineAmount(l), 0)), rnd = r2(b.total - subtotal)
       if (!dryRun) await tx.invoice.create({ data: { number, kind: 'purchase', date: new Date(b.date), contactId, total: b.total, tax: 0, taxRate: 0, status: 'active',
         reference: clean(ref), description: clean(b.description), subtotal, rounding: rnd, lines: { create: lines } } })
@@ -133,27 +137,26 @@ export async function runLedger(tx, data, dryRun) {
       if (!bank) throw new Error(`${kind} ${doc.date}: unknown bank account`)
       if (!doc.bankKey) rep[receipt ? 'undepositedReceipts' : 'undepositedPayments']++
       const lines = doc.lines.map(l => {
-        
         let accountId = (l.accountKey === link && idOf.get(doc.payerKey)) ? linkId : (receipt && l.itemKey ? acc['4000'] : suspense)
         if (accountId === suspense) rep.suspenseLines++
-               return { accountId, description: String(l.description || '').slice(0, 200), amount: l.amount, isLink: accountId === linkId, key: l.customerKey, invoiceKey: l.invoiceKey }
+        return { accountId, description: String(l.description || '').slice(0, 200), amount: l.amount, isLink: accountId === linkId, key: l.customerKey, invoiceKey: l.invoiceKey, projectId: projectOf(l.projectKey) }
       })
       const total = r2(lines.reduce((s, l) => s + l.amount, 0)), applied = r2(lines.filter(l => l.isLink).reduce((s, l) => s + l.amount, 0))
       if (lines.some(l => l.amount < 0)) rep.negativeAmounts.push(`${kind} ${doc.date} ${doc.reference || ''}: ${total}`)
       const dupe = `${doc.date}|${contactId}|${clean(doc.reference) || ''}|${total}`
       if (existingPay.has(dupe)) { rep.skipped[kind + 's']++; return }
-            const number = (receipt ? 'REC-' : 'PAY-') + String(++counters[kind]).padStart(4, '0')
+      const number = (receipt ? 'REC-' : 'PAY-') + String(++counters[kind]).padStart(4, '0')
       if (!dryRun) await tx.payment.create({ data: { kind, number, contactId, amount: applied, date: new Date(doc.date), reference: clean(doc.reference), description: clean(doc.description),
-        bankId: bank.id, total, lines: { create: lines.map(l => ({ accountId: l.accountId, description: l.description, amount: l.amount,
+        bankId: bank.id, total, lines: { create: lines.map(l => ({ accountId: l.accountId, description: l.description, amount: l.amount, projectId: l.projectId,
           invoiceId: receipt && l.isLink ? (invoiceIdByKey.get(l.invoiceKey) ?? null) : null })) } } })
       const memo = `${number} ${doc.reference || ''}`.trim()
       await journal(doc.date, memo, number, [side(bank.accountId, receipt ? total : -total), ...lines.map(l => side(l.accountId, receipt ? -l.amount : l.amount))])
-      for (const l of lines.filter(l => l.isLink)) bump(receipt ? (l.key || doc.payerKey) : doc.payerKey, -l.amount)   // both reduce what the contact owes
+      for (const l of lines.filter(l => l.isLink)) bump(doc.payerKey, -l.amount)   // doc.payerKey is already the customer / supplier this part belongs to
       rep.created[kind + 's']++
     }
-        // One Manager receipt can pay several customers (each line names its customer).
+
+    // One Manager receipt can pay several customers (each line names its customer or the invoice it pays).
     // We save one payment per customer, so every customer's balance is right.
-    
     const invCust = new Map(data.invoices.map(i => [i.key, i.customerKey]))
     const post = async (kind, doc) => {
       if (kind !== 'receipt') return postOne(kind, doc)
@@ -170,11 +173,29 @@ export async function runLedger(tx, data, dryRun) {
       if (!parts.size) parts.set(doc.payerKey, [])
       if (parts.size > 1) rep.notes.push(`Receipt ${doc.date} ref ${doc.reference || '-'} pays ${parts.size} customers: saved as ${parts.size} payments`)
       for (const [owner, lines] of parts) await postOne(kind, { ...doc, payerKey: owner, lines })
-  
     }
 
     for (const r of [...data.receipts].sort(byDate)) await post('receipt', r)
     for (const p of [...data.payments].sort(byDate)) await post('payment', p)
+
+    // ---- Expense claims (Dr General Expenses 6000 / Cr Employee Claims Payable 2200) ----
+    // A line that has no amount is dropped, like in your Expense Claims page. A claim with no amount at all is saved without lines and without an entry.
+    const claimsPayable = await upsert('2200', 'Employee Claims Payable', 'liability')
+    const lastClaim = await tx.expenseClaim.findFirst({ where: { number: { startsWith: 'EXP-' } }, orderBy: { id: 'desc' }, select: { number: true } })
+    let claimNo = lastClaim ? parseInt(lastClaim.number.slice(4), 10) || 0 : 0
+    const haveClaim = new Set((await tx.expenseClaim.findMany({ select: { date: true, paidById: true, reference: true, total: true } }))
+      .map(c => `${c.date.toISOString().slice(0, 10)}|${c.paidById}|${c.reference || ''}|${+c.total}`))
+    for (const c of [...(data.expenseClaims || [])].sort(byDate)) {
+      const paidById = employeeOf.get(c.employeeKey)
+      if (!paidById) { rep.notes.push(`Expense claim ${c.date} ref ${c.reference || '-'} has no employee in Manager and was skipped`); continue }
+      const lines = c.lines.map(l => ({ accountId: expense, description: String(l.description || c.description || '').trim().slice(0, 200), qty: r2(l.qty), price: r2(l.price) })).filter(l => l.qty * l.price > 0)
+      const total = r2(lines.reduce((s, l) => s + l.qty * l.price, 0))
+      if (haveClaim.has(`${c.date}|${paidById}|${clean(c.reference) || ''}|${total}`)) { rep.skipped.expenseClaims++; continue }
+      const number = 'EXP-' + String(++claimNo).padStart(4, '0')
+      if (!dryRun) await tx.expenseClaim.create({ data: { number, date: new Date(c.date), reference: clean(c.reference), paidById, payeeId: null, total, lines: { create: lines } } })
+      if (total > 0) await journal(c.date, `${number} ${c.reference || ''}`.trim(), number, [side(expense, total), side(claimsPayable, -total)])
+      rep.created.expenseClaims++
+    }
 
     // ---- Check: every customer's and supplier's balance must equal Manager's ----
     const names = new Map([...data.customers, ...data.suppliers].map(c => [c.key, c.name]))
